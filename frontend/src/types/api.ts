@@ -114,11 +114,13 @@ export interface MatchedPost {
   id: number;
   source_id: number;
   external_post_id: string;
-  author: string;
-  url: string;
+  // author/url: RSS 등 일부 소스는 값이 없을 수 있음. published_at: 피드에 게시일시가 없을 수 있음.
+  author: string | null;
+  url: string | null;
   content: string;
-  matched_keyword_id: number;
-  published_at: string;
+  // 키워드가 삭제되면 SET NULL 처리(매칭 이력은 보존) — backend/app/models/__init__.py 참고.
+  matched_keyword_id: number | null;
+  published_at: string | null;
   matched_at: string;
   status: MatchedPostStatus;
 }
@@ -128,8 +130,10 @@ export interface MatchListResponse {
   total: number;
 }
 
+// GET /api/matches/{id} 의 reply_actions 는 감사로그 목록과 달리 matched_post_id 를 포함하지 않는다
+// (backend/app/api/matches.py ReplyActionOut 참조).
 export interface MatchDetail extends MatchedPost {
-  reply_actions: ReplyAction[];
+  reply_actions: Array<Omit<ReplyAction, "matched_post_id">>;
 }
 
 export type ReplyActionType = "approved" | "sent" | "failed";
@@ -139,6 +143,7 @@ export interface ReplyAction {
   matched_post_id: number;
   reviewer_user_id: number;
   action: ReplyActionType;
+  template_id: number | null;
   external_reply_id: string | null;
   error: string | null;
   created_at: string;

@@ -133,6 +133,19 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     matched_at: "2026-07-17T14:03:00Z",
     status: "ignored",
   },
+  {
+    id: 5,
+    source_id: 3,
+    external_post_id: "cm_3001",
+    // RSS 글 중 author/guid published 가 없는 경우를 재현(FR-3) — null 필드 렌더링 확인용.
+    author: null,
+    url: null,
+    content: "이사 업체 후기 남깁니다",
+    matched_keyword_id: null,
+    published_at: null,
+    matched_at: "2026-07-20T08:00:00Z",
+    status: "new",
+  },
 ];
 
 export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
@@ -141,6 +154,7 @@ export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
     matched_post_id: 3,
     reviewer_user_id: 2,
     action: "approved",
+    template_id: 1,
     external_reply_id: null,
     error: null,
     created_at: "2026-07-18T09:20:00Z",

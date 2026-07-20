@@ -133,7 +133,12 @@ function handleGetMatches(query: MockRequestOptions["query"]): MatchListResponse
 
   const total = items.length;
   const start = (page - 1) * size;
-  return { items: items.slice(start, start + size), total };
+  const paged = items.slice(start, start + size);
+  // 목록은 요약만(최대 500자) — 전체 본문은 상세 API 에서. backend/app/api/matches.py 와 동일한 규칙.
+  const summarized = paged.map((m) =>
+    m.content.length > 500 ? { ...m, content: m.content.slice(0, 500) } : m
+  );
+  return { items: summarized, total };
 }
 
 function handleGetMatchDetail(id: number): MatchDetail {
@@ -146,6 +151,7 @@ function recordReplyAction(
   matchedPostId: number,
   reviewerId: number,
   action: ReplyAction["action"],
+  templateId: number | null,
   externalReplyId: string | null,
   error: string | null
 ): void {
@@ -154,6 +160,7 @@ function recordReplyAction(
     matched_post_id: matchedPostId,
     reviewer_user_id: reviewerId,
     action,
+    template_id: templateId,
     external_reply_id: externalReplyId,
     error,
     created_at: new Date().toISOString(),
@@ -171,22 +178,26 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
 
   match.status = "sending";
   lastApproveRequestByMatchId.set(id, req);
+  const templateId = req.template_id ?? null;
 
   if (canWrite(match.source_id)) {
     // final_body에 "실패테스트"를 포함해 502/재시도 흐름을 재현해볼 수 있다.
     if (req.final_body.includes("실패테스트")) {
       match.status = "reviewing";
-      recordReplyAction(id, user.id, "failed", null, "모의 전송 실패 (final_body에 '실패테스트' 포함)");
+      recordReplyAction(
+        id, user.id, "failed", templateId, null,
+        "모의 전송 실패 (final_body에 '실패테스트' 포함)"
+      );
       throw new MockApiError(502, "SNS 전송에 실패했습니다.");
     }
     match.status = "replied";
     const externalReplyId = `mock-reply-${id}-${Date.now()}`;
-    recordReplyAction(id, user.id, "sent", externalReplyId, null);
+    recordReplyAction(id, user.id, "sent", templateId, externalReplyId, null);
     return { action: "sent", external_reply_id: externalReplyId };
   }
 
   match.status = "replied";
-  recordReplyAction(id, user.id, "approved", null, null);
+  recordReplyAction(id, user.id, "approved", templateId, null, null);
   return { action: "approved", clipboard_body: req.final_body };
 }
 
