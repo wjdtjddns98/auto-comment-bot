@@ -117,7 +117,24 @@ async def test_cursor_advances_only_after_store_success(env):
     assert source.health_status == HealthStatus.ok and source.backoff_until is None
 
 
-async def test_unknown_adapter_skips(env, monkeypatch):
+async def test_unknown_adapter_marks_down(env, monkeypatch):
+    # 미구현 어댑터는 조용히 skip 되지 않고 down 으로 표시된다(2차 리뷰 M6)
     source, _, _ = env
     monkeypatch.setattr(poller, "get_adapter", lambda _type: None)
     assert await poller.poll_source(source) == 0
+    assert source.health_status == HealthStatus.down
+
+
+async def test_store_failure_is_accounted(env, monkeypatch):
+    """저장 단계 실패도 fetch 실패와 동일하게 회계된다(커서 미전진 + degraded)."""
+    source, _, fake = env
+    fake.result = [_post("https://ex.com/p/store-fail")]
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("store 실패 주입")
+
+    monkeypatch.setattr(poller, "_store_matches", boom)
+    assert await poller.poll_source(source) == 0
+    assert source.last_success_at is None
+    assert source.health_status == HealthStatus.degraded
+    assert source.last_polled_at is not None  # 선커밋 — poll_interval 준수

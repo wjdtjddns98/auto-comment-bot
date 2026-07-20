@@ -14,6 +14,7 @@ from tortoise.expressions import Q
 from app import matching
 from app.models import HealthStatus, Keyword, MatchedPost, Source
 from app.sources import RateLimitedError, get_adapter
+from app.sources.base import fit_external_id
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ async def poll_source(source: Source) -> int:
     source.last_polled_at = _now()
     await source.save(update_fields=["last_polled_at"])
     if adapter is None:
+        # 어댑터 미구현 타입이 "정상(ok)"으로 보이며 영구 skip 되지 않게 명시 회계.
+        source.health_status = HealthStatus.down
+        await source.save(update_fields=["health_status"])
         return 0
 
     try:
@@ -101,6 +105,10 @@ async def _record_failure(
         if retry_after_sec:
             delay = max(delay, min(retry_after_sec, 24 * 3600))
         source.backoff_until = _now() + timedelta(seconds=delay)
+    else:
+        # 일반 실패에는 backoff 를 걸지 않는다 — 이전 값이 남아 만료된 backoff 가
+        # API 에 계속 노출되지 않게 정리한다.
+        source.backoff_until = None
     await source.save(update_fields=["health_status", "backoff_until"])
 
 
@@ -125,7 +133,8 @@ async def _store_matches(source: Source, posts: list) -> int:
         rows.append(
             MatchedPost(
                 source=source,
-                external_post_id=post.external_post_id[:512],
+                # 저장 경계에서도 해시 고정 길이화 — 어댑터가 빠뜨려도 접두사 충돌 방지
+                external_post_id=fit_external_id(post.external_post_id),
                 # 어댑터가 절단하지 못한 경우의 모델 제약 방어(배치 전체 실패 방지)
                 author=post.author[:255] if post.author else None,
                 url=post.url[:1024] if post.url else None,

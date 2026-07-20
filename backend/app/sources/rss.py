@@ -82,8 +82,12 @@ def _parse_feed(body: bytes, base_url: str) -> list[FetchedPost]:
 
 async def _get_with_limits(url: str) -> tuple[bytes, str]:
     """크기 상한 스트리밍 GET + hop 별 SSRF 검증. (body, 최종 URL) 반환."""
+    # Accept-Encoding: identity — httpx 의 자동 압축 해제는 상한 검사보다 먼저 메모리를
+    # 할당해 81KB gzip 이 190MB 를 잡는다(2차 리뷰 C2 실측). 압축을 아예 받지 않는다.
     async with httpx.AsyncClient(
-        timeout=_TIMEOUT, headers={"User-Agent": _UA}, follow_redirects=False
+        timeout=_TIMEOUT,
+        headers={"User-Agent": _UA, "Accept-Encoding": "identity"},
+        follow_redirects=False,
     ) as client:
         current = url
         for _ in range(_MAX_REDIRECTS + 1):
@@ -103,6 +107,9 @@ async def _get_with_limits(url: str) -> tuple[bytes, str]:
                     raise RateLimitedError("HTTP 403")
                 if resp.status_code != 200:
                     raise FetchError(f"HTTP {resp.status_code}")
+                # 서버가 요청을 무시하고 압축을 보내면 거부(압축 폭탄 방어선 유지)
+                if resp.headers.get("content-encoding", "identity").lower() != "identity":
+                    raise FetchError("압축 응답 거부(Accept-Encoding: identity 요청)")
                 chunks: list[bytes] = []
                 total = 0
                 async for chunk in resp.aiter_bytes():
@@ -122,13 +129,16 @@ class RssAdapter:
         if not rss_url:
             raise FetchError("config.rss_url 미설정")
         try:
+            # 파싱까지 데드라인 안에 둔다 — 거대/기형 XML 파싱이 tick 전체를 막지 않게.
+            # 주의: 스레드는 강제 종료 불가라 타임아웃 후에도 백그라운드로 계속 돈다.
+            # CPU 하드 상한이 필요해지면 ProcessPoolExecutor + terminate 로 승급할 것.
             async with asyncio.timeout(_DEADLINE_SEC):
                 body, final_url = await _get_with_limits(rss_url)
+                # 파싱은 CPU 작업 → executor 오프로드 (NFR-P1)
+                return await asyncio.get_running_loop().run_in_executor(
+                    None, _parse_feed, body, final_url
+                )
         except TimeoutError as exc:
             raise FetchError("요청 데드라인 초과") from exc
         except httpx.HTTPError as exc:
             raise FetchError(f"RSS 요청 실패: {type(exc).__name__}") from exc
-        # 파싱은 CPU 작업 → executor 오프로드 (NFR-P1)
-        return await asyncio.get_running_loop().run_in_executor(
-            None, _parse_feed, body, final_url
-        )

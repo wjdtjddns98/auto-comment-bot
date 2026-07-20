@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,7 +27,7 @@ class Settings(BaseSettings):
 
     # poller (M1). tick 은 "폴링 주기 도래 판정" 주기 — 소스별 실제 주기는 poll_interval_sec.
     poller_enabled: bool = True
-    poller_tick_sec: int = 30
+    poller_tick_sec: int = Field(default=30, ge=1)
 
     @property
     def cookie_secure(self) -> bool:

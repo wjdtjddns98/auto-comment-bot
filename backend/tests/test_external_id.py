@@ -30,6 +30,16 @@ def test_query_identified_posts_not_merged():
     assert a == c == d
 
 
+def test_ref_prefixed_identifiers_preserved():
+    # "ref" 는 정확일치로만 제거 — refid/referrer 같은 식별자는 보존 (2차 리뷰 C1 회귀)
+    a = stable_external_id("https://board.ex.com/view?refid=12345", "author", None)
+    b = stable_external_id("https://board.ex.com/view?refid=99999", "author", None)
+    assert a != b
+    assert normalize_url("https://board.ex.com/view?referrer=x") == "board.ex.com/view?referrer=x"
+    # 정확일치 ref 는 여전히 제거
+    assert normalize_url("https://board.ex.com/view?ref=share") == "board.ex.com/view"
+
+
 def test_different_post_different_id():
     a = stable_external_id("https://ex.com/post/1", "author1", TS)
     b = stable_external_id("https://ex.com/post/2", "author1", TS)

@@ -47,7 +47,15 @@ class SourceAdapter(Protocol):
 
 # 추적용 파라미터만 제거한다. 쿼리 전체 제거는 ?id=N 처럼 쿼리가 게시물 식별자인
 # 게시판 URL 에서 서로 다른 글을 병합시키므로 금지(적대 리뷰 H2 실측).
-_TRACKING_PARAMS = ("utm_", "ref", "fbclid", "gclid", "igshid", "share_id")
+# 접두사 매칭은 utm_ 에만 — "ref" 를 접두사로 쓰면 refid/referrer 같은 식별자까지
+# 지워져 같은 버그가 재발한다(2차 리뷰 C1 실측).
+_TRACKING_EXACT = frozenset({"ref", "fbclid", "gclid", "igshid", "share_id"})
+_TRACKING_PREFIXES = ("utm_",)
+
+
+def _is_tracking_param(key: str) -> bool:
+    k = key.lower()
+    return k in _TRACKING_EXACT or any(k.startswith(p) for p in _TRACKING_PREFIXES)
 
 
 def normalize_url(url: str) -> str:
@@ -59,7 +67,7 @@ def normalize_url(url: str) -> str:
     kept = sorted(
         (k, v)
         for k, v in parse_qsl(parts.query, keep_blank_values=True)
-        if not any(k.lower() == p or k.lower().startswith(p) for p in _TRACKING_PARAMS)
+        if not _is_tracking_param(k)
     )
     query = f"?{urlencode(kept)}" if kept else ""
     return f"{host}{path}{query}"
@@ -112,8 +120,9 @@ async def assert_public_http_url(url: str) -> None:
         for info in infos:
             try:
                 addrs.append(ipaddress.ip_address(info[4][0]))
-            except ValueError:
-                continue
+            except ValueError as exc:
+                # fail-closed: 파싱 못 한 주소가 섞이면 통과시키지 않는다.
+                raise FetchError("해석된 주소 형식 확인 실패") from exc
     if not addrs:
         raise FetchError("호스트 해석 실패")
     for addr in addrs:
