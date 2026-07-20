@@ -12,6 +12,10 @@ import type {
   Template,
   User,
 } from "../types/api";
+import { MockApiError, mockRequest } from "./mock/mockServer";
+
+// 백엔드 없이 개발 가능하도록 하는 모의 서버 스위치 (frontend/.env.mock, `npm run dev:mock`).
+const MOCK_ENABLED = import.meta.env.VITE_USE_MOCK === "true";
 
 export class ApiError extends Error {
   status: number;
@@ -74,6 +78,16 @@ async function request<T>(
 ): Promise<T> {
   const method = options.method ?? "GET";
   const isMutating = MUTATING_METHODS.has(method);
+
+  if (MOCK_ENABLED) {
+    try {
+      return await mockRequest<T>(path, options);
+    } catch (err) {
+      if (err instanceof MockApiError) throw new ApiError(err.status, err.detail);
+      throw err;
+    }
+  }
+
   const headers: Record<string, string> = {};
   let body: string | undefined;
 
