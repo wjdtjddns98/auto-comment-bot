@@ -168,7 +168,8 @@ export default function DashboardPage() {
               )}
               {matchesQuery.data.items.map((m) => {
                 const source = sourceMap.get(m.source_id);
-                const keyword = keywordMap.get(m.matched_keyword_id);
+                const keyword =
+                  m.matched_keyword_id != null ? keywordMap.get(m.matched_keyword_id) : undefined;
                 return (
                   <Tr
                     key={m.id}
@@ -183,7 +184,7 @@ export default function DashboardPage() {
                     <Td className="max-w-sm truncate" title={m.content}>
                       {m.content}
                     </Td>
-                    <Td>{m.author}</Td>
+                    <Td>{m.author ?? "-"}</Td>
                     <Td className="whitespace-nowrap">{formatDateTime(m.matched_at)}</Td>
                     <Td>
                       {m.url && (

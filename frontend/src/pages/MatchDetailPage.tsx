@@ -146,14 +146,18 @@ export default function MatchDetailPage() {
       <Card className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-gray-500">
           <span>소스: {source ? SOURCE_TYPE_LABEL[source.type] : `#${match.source_id}`}</span>
-          <span>작성자: {match.author}</span>
+          <span>작성자: {match.author ?? "-"}</span>
           <span>게시일시: {formatDateTime(match.published_at)}</span>
           <span>매칭일시: {formatDateTime(match.matched_at)}</span>
         </div>
         <p className="whitespace-pre-wrap text-gray-900">{match.content}</p>
-        <a href={match.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600 hover:underline">
-          원문 보기 ↗
-        </a>
+        {match.url ? (
+          <a href={match.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600 hover:underline">
+            원문 보기 ↗
+          </a>
+        ) : (
+          <span className="text-sm text-gray-400">원문 링크 없음</span>
+        )}
       </Card>
 
       {actionable ? (
