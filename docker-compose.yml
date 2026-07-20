@@ -21,9 +21,14 @@ services:
     environment:
       DATABASE_URL: postgres://sns:sns@db:5432/sns
       APP_ENV: dev
+      # 영구 자동 리포터: NOTION_TOKEN 은 .env 에서 주입(비면 잡 미등록)
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      GIT_REPO_DIR: /repo
     volumes:
       # dev: 호스트 코드 마운트 → 코드/마이그레이션이 호스트에 반영됨
       - ./backend:/app
+      # 리포터가 git 로그를 읽도록 저장소 루트(.git) 읽기전용 마운트
+      - ./:/repo:ro
     ports:
       - "8000:8000"
     depends_on:

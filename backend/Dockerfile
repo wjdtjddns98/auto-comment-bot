@@ -3,6 +3,10 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# git: 영구 자동 리포터가 /repo 의 커밋 로그를 읽는다
+RUN apt-get update && apt-get install -y --no-install-recommends git \
+    && rm -rf /var/lib/apt/lists/*
+
 # 의존성 레이어 캐시: requirements 먼저 복사
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

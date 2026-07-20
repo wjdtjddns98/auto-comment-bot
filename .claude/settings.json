@@ -1,4 +1,9 @@
 {
+  "enabledPlugins": {
+    "fablize@fablize": false,
+    "ponytail@ponytail": false,
+    "oh-my-claudecode@omc": false
+  },
   "hooks": {
     "PreToolUse": [
       {
