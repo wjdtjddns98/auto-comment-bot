@@ -11,6 +11,8 @@ from datetime import datetime
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit
 
+from pydantic import BaseModel
+
 from app.models import Source
 
 
@@ -38,6 +40,8 @@ class FetchedPost:
 
 class SourceAdapter(Protocol):
     can_write: bool
+    # 타입별 config 스키마 — API 계층이 등록/수정 시점에 검증한다(extra="forbid" 권장).
+    config_model: type[BaseModel]
 
     async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:
         """since(=last_success_at 커서) 이후 글 목록. 활용 여부는 어댑터 재량 —
