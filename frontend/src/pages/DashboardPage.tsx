@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getKeywords, getMatches, getSources } from "../lib/apiClient";
 import type { MatchedPostStatus } from "../types/api";
@@ -17,6 +17,15 @@ import {
 } from "../lib/matchDisplay";
 
 const PAGE_SIZE = 20;
+
+function ExternalLinkIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="currentColor" className="h-4 w-4" aria-hidden="true">
+      <path d="M11 3a1 1 0 100 2h2.586l-6.293 6.293a1 1 0 101.414 1.414L15 6.414V9a1 1 0 102 0V4a1 1 0 00-1-1h-5z" />
+      <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" />
+    </svg>
+  );
+}
 
 const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }> = [
   { value: "all", label: "전체" },
@@ -59,6 +68,7 @@ function SourceHealthBar() {
 }
 
 export default function DashboardPage() {
+  const navigate = useNavigate();
   const [status, setStatus] = useState<MatchedPostStatus | "all">("all");
   const [sourceId, setSourceId] = useState<number | "all">("all");
   const [page, setPage] = useState(1);
@@ -160,7 +170,11 @@ export default function DashboardPage() {
                 const source = sourceMap.get(m.source_id);
                 const keyword = keywordMap.get(m.matched_keyword_id);
                 return (
-                  <Tr key={m.id} className="hover:bg-gray-50">
+                  <Tr
+                    key={m.id}
+                    className="cursor-pointer hover:bg-gray-50"
+                    onClick={() => navigate(`/matches/${m.id}`)}
+                  >
                     <Td>
                       <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
                     </Td>
@@ -172,9 +186,18 @@ export default function DashboardPage() {
                     <Td>{m.author}</Td>
                     <Td className="whitespace-nowrap">{formatDateTime(m.matched_at)}</Td>
                     <Td>
-                      <Link to={`/matches/${m.id}`} className="text-brand-600 hover:underline">
-                        상세
-                      </Link>
+                      {m.url && (
+                        <a
+                          href={m.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="원문 보기"
+                          className="inline-flex text-gray-400 hover:text-brand-600"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ExternalLinkIcon />
+                        </a>
+                      )}
                     </Td>
                   </Tr>
                 );
