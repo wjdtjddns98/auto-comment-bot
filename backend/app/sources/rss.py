@@ -15,6 +15,7 @@ from urllib.parse import urljoin
 
 import feedparser
 import httpx
+from pydantic import BaseModel, ConfigDict, HttpUrl, field_validator
 
 from app.models import Source
 from app.sources.base import (
@@ -121,8 +122,31 @@ async def _get_with_limits(url: str) -> tuple[bytes, str]:
         raise FetchError("리다이렉트 한도 초과")
 
 
+class RssConfig(BaseModel):
+    """community 소스 config 스키마 — 등록/수정 시점에 API 계층이 검증한다.
+
+    extra="forbid": 키 오타(rss_uri 등)가 저장돼 poller 시점에야 실패하는 것을 차단.
+    SSRF 검증은 여기서 하지 않는다 — DNS TOCTOU 때문에 매 요청 시점 검증이 기준선이다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rss_url: HttpUrl
+
+    @field_validator("rss_url")
+    @classmethod
+    def _reject_userinfo(cls, value: HttpUrl) -> HttpUrl:
+        # fetch 시점 가드(assert_public_http_url)와 허용 범위를 맞춘다 — HttpUrl 은
+        # userinfo 를 통과시키므로 여기서 막지 않으면 "등록은 201, poller 는 영구 실패"
+        # 소스가 생기고, URL 속 평문 자격증명이 config 로 저장·응답에 반사된다(불변식 ③ 위험군).
+        if value.username is not None or value.password is not None:
+            raise ValueError("URL userinfo(자격증명 포함 URL)는 허용되지 않습니다")
+        return value
+
+
 class RssAdapter:
     can_write = False
+    config_model = RssConfig
 
     async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:
         rss_url = (source.config or {}).get("rss_url")

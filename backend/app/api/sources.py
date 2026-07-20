@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tortoise.exceptions import IntegrityError
 
 from app import poller
@@ -43,6 +43,28 @@ class SourcePatch(PatchModel):
     config: dict[str, Any] | None = None
 
 
+def _validate_config(source_type: SourceType, config: dict[str, Any]) -> dict[str, Any]:
+    """타입별 config 스키마 검증 — 키 오타·형식 오류를 poller 시점이 아닌 등록/수정
+    시점에 422 로 돌려준다. 정규화된 dict(예: HttpUrl→str)를 반환한다."""
+    adapter = get_adapter(source_type)
+    if adapter is None:
+        # 어댑터 미구현 타입을 "정상(ok)"으로 보이게 등록만 되는 상태 방지(silent skip).
+        raise HTTPException(
+            status_code=422, detail=f"아직 지원되지 않는 소스 타입입니다: {source_type.value}"
+        )
+    try:
+        model = adapter.config_model.model_validate(config)
+    except ValidationError as exc:
+        fields = "; ".join(
+            f"config.{'.'.join(str(p) for p in e['loc']) or '(root)'}: {e['msg']}"
+            for e in exc.errors()
+        )
+        raise HTTPException(
+            status_code=422, detail=f"소스 설정이 올바르지 않습니다 — {fields}"
+        ) from exc
+    return model.model_dump(mode="json")
+
+
 @router.get("")
 async def list_sources() -> list[SourceOut]:
     return [SourceOut.model_validate(s) for s in await Source.all().order_by("id")]
@@ -52,13 +74,8 @@ async def list_sources() -> list[SourceOut]:
 async def create_source(
     body: SourceIn, admin: Annotated[User, Depends(require_admin)]
 ) -> SourceOut:
-    if get_adapter(body.type) is None:
-        # 어댑터 미구현 타입을 "정상(ok)"으로 보이게 등록만 되는 상태 방지(silent skip).
-        raise HTTPException(
-            status_code=422, detail=f"아직 지원되지 않는 소스 타입입니다: {body.type.value}"
-        )
     s = await Source.create(
-        user=admin, type=body.type, config=body.config,
+        user=admin, type=body.type, config=_validate_config(body.type, body.config),
         poll_interval_sec=body.poll_interval_sec,
     )
     return SourceOut.model_validate(s)
@@ -67,6 +84,14 @@ async def create_source(
 @router.patch("/{source_id}", dependencies=[Depends(require_csrf)])
 async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
     changes = body.model_dump(exclude_unset=True)
+    # config 변경 시 + enabled=true 재활성화 시 검증한다 — 후자는 API 검증 도입 전에
+    # 저장된 무효 config 소스를 그대로 켜서 poller 만 영구 실패하는 상태를 막는다(리뷰 #2).
+    if "config" in changes or changes.get("enabled") is True:
+        # 검증에 소스 타입(과 기존 config)이 필요 — UPDATE 전에 조회한다(없으면 404).
+        s = await Source.get_or_none(id=source_id)
+        if s is None:
+            raise HTTPException(status_code=404, detail="소스가 없습니다")
+        changes["config"] = _validate_config(s.type, changes.get("config", s.config or {}))
     # 부분 UPDATE 만 실행 — 전체 save() 는 poller 가 방금 갱신한 last_polled_at·
     # health_status 등을 stale 값으로 되돌리는 lost-update 를 만든다(적대 리뷰 H5).
     if changes:

@@ -81,6 +81,117 @@ async def test_source_poll_interval_floor(admin_session):
     assert r.status_code == 422
 
 
+async def test_source_config_schema_validation(admin_session):
+    """타입별 config 스키마 — 키 오타·형식 오류를 poller 시점이 아닌 등록/수정 시점에 422."""
+    client, csrf = admin_session
+    # rss_url 누락 → 422 + 필드 경로 명시
+    r = await client.post("/api/sources", json={"type": "community"}, headers=csrf)
+    assert r.status_code == 422 and "config.rss_url" in r.json()["detail"]
+    # http/https 외 스킴 거부
+    r = await client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "ftp://ex.am/feed"}},
+        headers=csrf,
+    )
+    assert r.status_code == 422
+    # 미지의 키(오타 rss_uri) 불허 — 조용히 저장돼 수집 실패로 이어지는 것 방지
+    r = await client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "https://ex.am/f", "rss_uri": "x"}},
+        headers=csrf,
+    )
+    assert r.status_code == 422
+    # userinfo(자격증명) 포함 URL 거부 — 비밀번호가 detail 로도 반사되지 않아야 한다
+    r = await client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "https://user:s3cr3t@ex.am/feed"}},
+        headers=csrf,
+    )
+    assert r.status_code == 422 and "s3cr3t" not in r.text
+    # 명시적 config: null → 422 (dict 타입 위반)
+    r = await client.post(
+        "/api/sources", json={"type": "community", "config": None}, headers=csrf
+    )
+    assert r.status_code == 422
+
+    create = await client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "https://ex.am/f"}},
+        headers=csrf,
+    )
+    assert create.status_code == 201
+    src = create.json()
+    try:
+        # PATCH 도 동일 스키마 검증
+        r = await client.patch(
+            f"/api/sources/{src['id']}", json={"config": {"rss_uri": "x"}}, headers=csrf
+        )
+        assert r.status_code == 422
+        r = await client.patch(
+            f"/api/sources/{src['id']}",
+            json={"config": {"rss_url": "https://ex.am/g"}},
+            headers=csrf,
+        )
+        assert r.status_code == 200 and r.json()["config"]["rss_url"] == "https://ex.am/g"
+        # PATCH config: null → 422 (PatchModel 명시적 null 거부의 sources 회귀 가드)
+        r = await client.patch(
+            f"/api/sources/{src['id']}", json={"config": None}, headers=csrf
+        )
+        assert r.status_code == 422
+        # 없는 소스에 config PATCH → 404 (검증 전 조회 경로)
+        r = await client.patch(
+            "/api/sources/999999",
+            json={"config": {"rss_url": "https://ex.am/f"}},
+            headers=csrf,
+        )
+        assert r.status_code == 404
+    finally:
+        await client.delete(f"/api/sources/{src['id']}", headers=csrf)
+
+
+async def test_source_reactivation_revalidates_legacy_config(admin_session):
+    """API 검증 도입 전 저장된 무효 config 소스는 enabled=true 재활성화도 422 로 막는다."""
+    client, csrf = admin_session
+    create = await client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}},
+        headers=csrf,
+    )
+    assert create.status_code == 201
+    src = create.json()
+    try:
+        # 레거시 상태 재현: API 를 우회해 무효(빈) config + 비활성으로 되돌린다
+        await Source.filter(id=src["id"]).update(config={}, enabled=False)
+
+        r = await client.patch(f"/api/sources/{src['id']}", json={"enabled": True}, headers=csrf)
+        assert r.status_code == 422 and "config.rss_url" in r.json()["detail"]
+
+        # config 를 고치면서 켜는 것은 허용
+        r = await client.patch(
+            f"/api/sources/{src['id']}",
+            json={"enabled": True, "config": {"rss_url": "https://ex.am/fixed"}},
+            headers=csrf,
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["enabled"] is True and body["config"]["rss_url"] == "https://ex.am/fixed"
+    finally:
+        await client.delete(f"/api/sources/{src['id']}", headers=csrf)
+
+
+async def test_registered_adapters_have_config_model():
+    # 레지스트리 계약: 어댑터를 추가하면 config_model 도 반드시 딸려와야 한다(누락 시 500 방지)
+    from pydantic import BaseModel
+
+    from app.models import SourceType
+    from app.sources import get_adapter
+
+    for t in SourceType:
+        adapter = get_adapter(t)
+        if adapter is not None:
+            assert issubclass(adapter.config_model, BaseModel)
+
+
 async def test_keyword_regex_validation_and_scope(admin_session):
     client, csrf = admin_session
     # 잘못된 regex → 422
@@ -123,7 +234,7 @@ async def test_patch_explicit_null_422(admin_session):
 async def test_delete_preserves_match_history(admin_session):
     """감사 보호: 소스 삭제는 이력 있으면 409(RESTRICT), 키워드 삭제는 이력 보존(SET NULL)."""
     client, csrf = admin_session
-    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
     kw = (await client.post("/api/keywords", json={"pattern": "키워드"}, headers=csrf)).json()
     post = await MatchedPost.create(
         source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}",
@@ -144,7 +255,7 @@ async def test_delete_preserves_match_history(admin_session):
 async def test_delete_source_with_scoped_keyword_409(admin_session):
     # 소스 삭제가 스코프된 키워드를 조용히 연쇄 삭제하지 않는다 (RESTRICT → 409)
     client, csrf = admin_session
-    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
     kw = (
         await client.post(
             "/api/keywords", json={"pattern": "키워드", "source_scope": src["id"]}, headers=csrf
@@ -159,7 +270,7 @@ async def test_reply_action_fk_protections(admin_session):
     """감사 이력 FK: template/sns_account 삭제 → SET NULL 보존, matched_post·reviewer → RESTRICT."""
     client, csrf = admin_session
     me = (await client.get("/api/auth/me")).json()
-    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
     tpl = (await client.post("/api/templates", json={"name": "t", "body": "b"}, headers=csrf)).json()
     account = await SnsAccount.create(
         user_id=me["id"], platform=Platform.threads, display_name="감사테스트"
