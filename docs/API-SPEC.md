@@ -65,16 +65,22 @@ Req `{ pattern, match_type: "substring|regex", source_scope?: int|null }` → 20
 
 ---
 
-## SNS 계정 (admin) — 토큰 배제
+## SNS 계정 (로그인 사용자 — 본인 귀속 셀프서비스) — 토큰 배제
+
+> 정책: 사용자는 **자기 SNS 계정만** 연동/조회/삭제한다. admin 은 전체 조회·삭제 가능(운영용).
+> M2 에서 Threads OAuth 콜백(`/api/sns-accounts/threads/oauth-url`·callback)이 추가될 예정 —
+> 그때까지는 개발자 콘솔에서 발급한 토큰을 credentials 로 직접 등록한다.
 
 ### `GET /api/sns-accounts`
-200 `[{ id, platform, display_name, status, token_expires_at }]` — **암호문/토큰 필드 없음**.
+200 `[{ id, user_id, platform, display_name, status, token_expires_at }]` — **암호문/토큰 필드 없음**.
+본인 계정만 반환(admin 은 전체).
 
 ### `POST /api/sns-accounts`
-Req `{ platform, display_name, credentials: {...} }` → 201 `{ id, platform, display_name, status }`.
+Req `{ platform, display_name, credentials: {...} }` → 201 `{ id, user_id, platform, display_name, status, token_expires_at }`.
 → `credentials`는 서버가 즉시 Fernet 암호화해 `sns_account_secrets`에 저장. 응답에 재노출 안 함.
+→ 생성 주체에게 자동 귀속(타인 명의 등록 불가).
 
-### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade).
+### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
 
 ---
 
