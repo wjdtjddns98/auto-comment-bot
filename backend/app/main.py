@@ -8,14 +8,17 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from tortoise import Tortoise, connections
 
+from app import poller
 from app.api.auth import router as auth_router
 from app.api.keywords import router as keywords_router
+from app.api.matches import router as matches_router
 from app.api.sns_accounts import router as sns_accounts_router
 from app.api.sources import router as sources_router
 from app.api.templates import router as templates_router
 from app.config import settings
 from app.db import TORTOISE_ORM
 from app.integrations.notion import post_daily
+from app.models import Source
 
 scheduler = AsyncIOScheduler()
 
@@ -33,6 +36,12 @@ async def lifespan(app: FastAPI):
     if settings.notion_token:
         scheduler.add_job(post_daily, "cron", hour=18, minute=3,
                           id="daily_notion", replace_existing=True)
+    # poller: 주기 수집 tick (FR-1). 소스별 poll_interval_sec 판정은 tick 안에서.
+    if settings.poller_enabled:
+        scheduler.add_job(poller.poll_tick, "interval",
+                          seconds=settings.poller_tick_sec,
+                          id="poller", replace_existing=True)
+    if scheduler.get_jobs():
         scheduler.start()
     yield
     if scheduler.running:
@@ -56,6 +65,7 @@ app.include_router(sources_router)
 app.include_router(keywords_router)
 app.include_router(templates_router)
 app.include_router(sns_accounts_router)
+app.include_router(matches_router)
 
 
 @app.get("/health")
@@ -63,7 +73,26 @@ async def health():
     # DB까지 실제로 왕복해야 "떠 있음"이 아니라 "동작함"을 증명한다.
     try:
         await connections.get("default").execute_query("SELECT 1")
+        sources = await Source.filter(enabled=True).order_by("id")
     except Exception:  # noqa: BLE001 - 상세는 서버 로그에만(예외 문자열에 접속정보 포함 가능)
         logging.getLogger(__name__).exception("health: DB 왕복 실패")
         return {"status": "degraded", "db": "error"}
-    return {"status": "ok", "db": "ok"}
+    last_tick = poller.state["last_tick"]
+    return {
+        "status": "ok",
+        "db": "ok",
+        # poller heartbeat + 소스별 상태 배지 (FR-17·18)
+        "poller": {
+            "last_tick": last_tick.isoformat() if last_tick else None,
+            "sources": [
+                {
+                    "source_id": s.id,
+                    "health_status": s.health_status.value,
+                    "last_success_at": (
+                        s.last_success_at.isoformat() if s.last_success_at else None
+                    ),
+                }
+                for s in sources
+            ],
+        },
+    }
