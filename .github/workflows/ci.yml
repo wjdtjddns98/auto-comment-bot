@@ -60,7 +60,7 @@ jobs:
       - name: Lint (ruff)
         run: ruff check .
       - name: Test (pytest, DB 불필요)
-        run: pytest
+        run: pytest -m "not db"
 
   pg-migration:
     name: PostgreSQL 마이그레이션 적용
@@ -97,6 +97,8 @@ jobs:
           pip install -r requirements-dev.txt
       - name: aerich 마이그레이션 적용(실 PG)
         run: aerich upgrade
+      - name: DB 통합 테스트 (pytest -m db, 마이그레이션 적용된 스키마 대상)
+        run: pytest -m db
 
   frontend-build:
     name: 프론트엔드 빌드(타입체크)

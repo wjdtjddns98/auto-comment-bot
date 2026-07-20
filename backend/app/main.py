@@ -4,6 +4,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI
 from tortoise import Tortoise, connections
 
+from app.api.auth import router as auth_router
 from app.config import settings
 from app.db import TORTOISE_ORM
 from app.integrations.notion import post_daily
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="SNS Keyword Monitor", lifespan=lifespan)
+app.include_router(auth_router)
 
 
 @app.get("/health")

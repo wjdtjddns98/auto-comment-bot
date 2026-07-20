@@ -7,3 +7,5 @@ tomlkit==0.13.2
 pydantic-settings==2.7.1
 apscheduler==3.11.0
 httpx==0.28.1
+cryptography==49.0.0
+argon2-cffi==25.1.0

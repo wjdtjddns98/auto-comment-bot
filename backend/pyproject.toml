@@ -10,3 +10,5 @@ extend-exclude = ["migrations"]
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = ["db: 실 Postgres 필요 — DATABASE_URL 설정 시에만 실행(CI pg 잡)"]

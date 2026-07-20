@@ -14,7 +14,16 @@ class Settings(BaseSettings):
     notion_report_db: str = "915726bfb5154593b5def3ea1cacc813"
     notion_scrum_db: str = "fe5c49f4a3fb40898ed983ab22e9e8e3"
 
-    # ponytail: Fernet 키/외부 API 토큰은 sns_accounts 모델이 생기는 M1에서 추가.
+    # 인증/암호화 (M1)
+    # 세션 쿠키 서명·암호화 키(Fernet). dev 에서 비면 임시 키 자동 생성(app/auth.py).
+    session_fernet_key: str = ""
+    session_ttl_sec: int = 60 * 60 * 24 * 7  # 7일
+    # SNS 자격증명 암호화 키(쉼표 구분, 첫 키=암호화·나머지=복호 전용 — 회전 경로 NFR-S2).
+    credentials_fernet_keys: str = ""
+
+    @property
+    def cookie_secure(self) -> bool:
+        return self.app_env != "dev"
 
 
 settings = Settings()
