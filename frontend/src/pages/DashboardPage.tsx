@@ -1,8 +1,242 @@
-export default function DashboardPage() {
+import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { getKeywords, getMatches, getSources } from "../lib/apiClient";
+import type { MatchedPostStatus } from "../types/api";
+import { Badge, type BadgeTone } from "../components/ui/Badge";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { Select } from "../components/ui/Input";
+import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
+
+const PAGE_SIZE = 20;
+
+const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }> = [
+  { value: "all", label: "전체" },
+  { value: "new", label: "신규" },
+  { value: "reviewing", label: "검토중" },
+  { value: "sending", label: "전송중" },
+  { value: "replied", label: "답변완료" },
+  { value: "ignored", label: "무시됨" },
+];
+
+const STATUS_TONE: Record<MatchedPostStatus, BadgeTone> = {
+  new: "info",
+  reviewing: "warning",
+  sending: "warning",
+  replied: "success",
+  ignored: "neutral",
+};
+
+const STATUS_LABEL: Record<MatchedPostStatus, string> = {
+  new: "신규",
+  reviewing: "검토중",
+  sending: "전송중",
+  replied: "답변완료",
+  ignored: "무시됨",
+};
+
+const SOURCE_TYPE_LABEL: Record<string, string> = {
+  threads: "Threads",
+  naver_cafe: "네이버 카페",
+  community: "커뮤니티",
+};
+
+const HEALTH_TONE: Record<string, BadgeTone> = {
+  ok: "success",
+  degraded: "warning",
+  down: "danger",
+};
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleString("ko-KR", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function SourceHealthBar() {
+  const { data: sources, isLoading } = useQuery({ queryKey: ["sources"], queryFn: getSources });
+
+  if (isLoading) return <p className="text-sm text-gray-500">소스 상태 확인 중…</p>;
+  if (!sources || sources.length === 0) return null;
+
   return (
-    <section>
-      <h1>대시보드</h1>
-      <p>매칭 리스트 + 필터(status/source) + 소스 헬스 배지 — 구현 예정 (P0).</p>
+    <div className="flex flex-wrap gap-3">
+      {sources.map((source) => (
+        <Card key={source.id} className="flex items-center gap-3 px-4 py-2.5">
+          <span className="font-medium text-gray-900">
+            {SOURCE_TYPE_LABEL[source.type] ?? source.type}
+          </span>
+          <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>
+            ● {source.health_status}
+          </Badge>
+          {!source.enabled && <Badge tone="neutral">비활성</Badge>}
+          <span className="text-xs text-gray-500">
+            최근 수집 {formatDateTime(source.last_success_at)}
+          </span>
+          {source.backoff_until && (
+            <span className="text-xs text-tone-danger">
+              backoff ~{formatDateTime(source.backoff_until)}
+            </span>
+          )}
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+export default function DashboardPage() {
+  const [status, setStatus] = useState<MatchedPostStatus | "all">("all");
+  const [sourceId, setSourceId] = useState<number | "all">("all");
+  const [page, setPage] = useState(1);
+
+  const { data: sources } = useQuery({ queryKey: ["sources"], queryFn: getSources });
+  const { data: keywords } = useQuery({ queryKey: ["keywords"], queryFn: getKeywords });
+
+  const matchesQuery = useQuery({
+    queryKey: ["matches", { status, sourceId, page }],
+    queryFn: () =>
+      getMatches({
+        status: status === "all" ? undefined : status,
+        source_id: sourceId === "all" ? undefined : sourceId,
+        page,
+        size: PAGE_SIZE,
+      }),
+    placeholderData: (prev) => prev,
+  });
+
+  const sourceMap = useMemo(() => new Map((sources ?? []).map((s) => [s.id, s])), [sources]);
+  const keywordMap = useMemo(() => new Map((keywords ?? []).map((k) => [k.id, k])), [keywords]);
+
+  const totalPages = matchesQuery.data
+    ? Math.max(1, Math.ceil(matchesQuery.data.total / PAGE_SIZE))
+    : 1;
+
+  function updateStatus(value: string) {
+    setStatus(value === "all" ? "all" : (value as MatchedPostStatus));
+    setPage(1);
+  }
+
+  function updateSource(value: string) {
+    setSourceId(value === "all" ? "all" : Number(value));
+    setPage(1);
+  }
+
+  return (
+    <section className="flex flex-col gap-6">
+      <div>
+        <h1 className="text-xl font-semibold text-gray-900">대시보드</h1>
+        <p className="text-sm text-gray-500">키워드 매칭 글을 검토하고 승인·전송합니다.</p>
+      </div>
+
+      <SourceHealthBar />
+
+      <Card className="flex flex-wrap items-end gap-4">
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          <span className="font-medium">상태</span>
+          <Select value={status} onChange={(e) => updateStatus(e.target.value)}>
+            {STATUS_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="flex flex-col gap-1 text-sm text-gray-700">
+          <span className="font-medium">소스</span>
+          <Select value={sourceId} onChange={(e) => updateSource(e.target.value)}>
+            <option value="all">전체</option>
+            {(sources ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {SOURCE_TYPE_LABEL[s.type] ?? s.type} #{s.id}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <span className="ml-auto text-sm text-gray-500">총 {matchesQuery.data?.total ?? 0}건</span>
+      </Card>
+
+      {matchesQuery.isLoading && <p className="text-sm text-gray-500">불러오는 중…</p>}
+      {matchesQuery.isError && (
+        <p className="text-sm text-tone-danger">매칭 목록을 불러오지 못했습니다.</p>
+      )}
+
+      {matchesQuery.data && (
+        <>
+          <Table>
+            <Thead>
+              <Tr>
+                <Th>상태</Th>
+                <Th>소스</Th>
+                <Th>키워드</Th>
+                <Th>내용</Th>
+                <Th>작성자</Th>
+                <Th>매칭일시</Th>
+                <Th />
+              </Tr>
+            </Thead>
+            <Tbody>
+              {matchesQuery.data.items.length === 0 && (
+                <Tr>
+                  <Td colSpan={7} className="py-8 text-center text-gray-400">
+                    조건에 맞는 매칭 글이 없습니다.
+                  </Td>
+                </Tr>
+              )}
+              {matchesQuery.data.items.map((m) => {
+                const source = sourceMap.get(m.source_id);
+                const keyword = keywordMap.get(m.matched_keyword_id);
+                return (
+                  <Tr key={m.id} className="hover:bg-gray-50">
+                    <Td>
+                      <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
+                    </Td>
+                    <Td>{source ? SOURCE_TYPE_LABEL[source.type] ?? source.type : `#${m.source_id}`}</Td>
+                    <Td>{keyword?.pattern ?? "-"}</Td>
+                    <Td className="max-w-sm truncate" title={m.content}>
+                      {m.content}
+                    </Td>
+                    <Td>{m.author}</Td>
+                    <Td className="whitespace-nowrap">{formatDateTime(m.matched_at)}</Td>
+                    <Td>
+                      <Link to={`/matches/${m.id}`} className="text-brand-600 hover:underline">
+                        상세
+                      </Link>
+                    </Td>
+                  </Tr>
+                );
+              })}
+            </Tbody>
+          </Table>
+
+          <div className="flex items-center justify-between">
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={page <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+            >
+              이전
+            </Button>
+            <span className="text-sm text-gray-500">
+              {page} / {totalPages} 페이지
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={page >= totalPages}
+              onClick={() => setPage((p) => p + 1)}
+            >
+              다음
+            </Button>
+          </div>
+        </>
+      )}
     </section>
   );
 }
