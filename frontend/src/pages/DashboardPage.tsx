@@ -3,11 +3,18 @@ import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getKeywords, getMatches, getSources } from "../lib/apiClient";
 import type { MatchedPostStatus } from "../types/api";
-import { Badge, type BadgeTone } from "../components/ui/Badge";
+import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
+import {
+  formatDateTime,
+  HEALTH_TONE,
+  SOURCE_TYPE_LABEL,
+  STATUS_LABEL,
+  STATUS_TONE,
+} from "../lib/matchDisplay";
 
 const PAGE_SIZE = 20;
 
@@ -19,45 +26,6 @@ const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }>
   { value: "replied", label: "답변완료" },
   { value: "ignored", label: "무시됨" },
 ];
-
-const STATUS_TONE: Record<MatchedPostStatus, BadgeTone> = {
-  new: "info",
-  reviewing: "warning",
-  sending: "warning",
-  replied: "success",
-  ignored: "neutral",
-};
-
-const STATUS_LABEL: Record<MatchedPostStatus, string> = {
-  new: "신규",
-  reviewing: "검토중",
-  sending: "전송중",
-  replied: "답변완료",
-  ignored: "무시됨",
-};
-
-const SOURCE_TYPE_LABEL: Record<string, string> = {
-  threads: "Threads",
-  naver_cafe: "네이버 카페",
-  community: "커뮤니티",
-};
-
-const HEALTH_TONE: Record<string, BadgeTone> = {
-  ok: "success",
-  degraded: "warning",
-  down: "danger",
-};
-
-function formatDateTime(iso: string | null): string {
-  if (!iso) return "-";
-  return new Date(iso).toLocaleString("ko-KR", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
 
 function SourceHealthBar() {
   const { data: sources, isLoading } = useQuery({ queryKey: ["sources"], queryFn: getSources });
