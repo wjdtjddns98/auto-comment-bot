@@ -62,7 +62,7 @@ function CreateSnsAccountForm() {
           <Input
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="예: @our_brand"
+            placeholder="예: @nutti_official"
           />
         </Field>
       </div>
