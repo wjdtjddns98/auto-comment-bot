@@ -1,7 +1,8 @@
 """운영 CLI — 최초 사용자 생성.
 
-사용: python -m app.cli create-user --email a@b.c --role admin [--password ...]
---password 생략 시 프롬프트로 입력(셸 히스토리에 비밀번호를 남기지 않는 권장 경로).
+사용: python -m app.cli create-user --email a@b.c --role admin
+비밀번호는 항상 프롬프트로만 입력받는다(--password 옵션 없음 —
+셸 히스토리·프로세스 목록에 평문이 남는 경로 자체를 제거).
 """
 import argparse
 import asyncio
@@ -28,11 +29,14 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     p = sub.add_parser("create-user", help="사용자 생성")
     p.add_argument("--email", required=True)
-    p.add_argument("--password", default=None)
     p.add_argument("--role", choices=[r.value for r in Role], default=Role.reviewer.value)
     args = parser.parse_args()
 
-    password = args.password or getpass.getpass("비밀번호: ")
+    password = getpass.getpass("비밀번호: ")
+    if not password:
+        parser.error("비밀번호는 비울 수 없습니다")
+    if password != getpass.getpass("비밀번호 확인: "):
+        parser.error("비밀번호가 일치하지 않습니다")
     asyncio.run(_create_user(args.email, password, Role(args.role)))
 
 

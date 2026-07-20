@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,7 +8,8 @@ class Settings(BaseSettings):
 
     # postgres 접속 (docker-compose에서 주입)
     database_url: str = "postgres://sns:sns@db:5432/sns"
-    app_env: str = "dev"
+    # 허용 값 고정: 오타(예: "production")로 dev 보안 설정이 조용히 적용되는 것 방지.
+    app_env: Literal["dev", "prod"] = "dev"
 
     # Notion 영구 자동 리포터. NOTION_TOKEN 이 비면 스케줄러가 잡을 등록 안 함.
     notion_token: str = ""

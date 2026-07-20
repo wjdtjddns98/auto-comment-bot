@@ -1,6 +1,8 @@
+import logging
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from cryptography.fernet import Fernet
 from fastapi import FastAPI
 from tortoise import Tortoise, connections
 
@@ -14,6 +16,12 @@ scheduler = AsyncIOScheduler()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.app_env == "prod":
+        # prod fail-fast: 세션 키 필수, 자격증명 키는 설정돼 있으면 형식 검증(NFR-S1·S2).
+        # 미설정/오형식이면 임시 키로 조용히 뜨는 대신 기동 자체를 실패시킨다.
+        Fernet(settings.session_fernet_key)
+        for key in filter(None, settings.credentials_fernet_keys.split(",")):
+            Fernet(key.strip())
     await Tortoise.init(config=TORTOISE_ORM)
     # 영구 자동 데일리 리포터: NOTION_TOKEN 있을 때만 매일 18:03 등록.
     if settings.notion_token:
@@ -35,6 +43,7 @@ async def health():
     # DB까지 실제로 왕복해야 "떠 있음"이 아니라 "동작함"을 증명한다.
     try:
         await connections.get("default").execute_query("SELECT 1")
-    except Exception as exc:  # noqa: BLE001 - health는 원인 문자열만 노출
-        return {"status": "degraded", "db": f"error: {exc}"}
+    except Exception:  # noqa: BLE001 - 상세는 서버 로그에만(예외 문자열에 접속정보 포함 가능)
+        logging.getLogger(__name__).exception("health: DB 왕복 실패")
+        return {"status": "degraded", "db": "error"}
     return {"status": "ok", "db": "ok"}

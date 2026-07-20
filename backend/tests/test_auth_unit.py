@@ -29,3 +29,11 @@ def test_csrf_differs_per_session():
     a = auth.read_session(auth.issue_session(1))
     b = auth.read_session(auth.issue_session(1))
     assert a["csrf"] != b["csrf"]
+
+
+def test_session_wrong_payload_types_rejected():
+    # 정상 암호화됐지만 형식이 오염된 payload 는 거부(uid=str, csrf=int, dict 아님).
+    f = auth._session_fernet()
+    for payload in ('{"uid": "1", "csrf": "x"}', '{"uid": 1, "csrf": 7}', '"not-a-dict"'):
+        token = f.encrypt(payload.encode()).decode()
+        assert auth.read_session(token) is None

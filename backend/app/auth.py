@@ -3,6 +3,10 @@
 세션은 서버 저장소 없는 stateless 토큰: {"uid", "csrf"} 를 Fernet 으로 암호화해
 HttpOnly 쿠키에 담는다. 만료는 Fernet ttl 검증, 로그아웃은 쿠키 삭제.
 CSRF 토큰은 세션 페이로드 안에 있어 세션과 수명을 같이한다(double-submit 불필요).
+
+트레이드오프(합의된 설계): stateless 라 서버측 강제 무효화가 없다 — 탈취된 토큰은
+ttl(기본 7일)까지 유효하다. 필요해지면 User.session_version 을 payload 에 포함시키고
+로그아웃/비밀번호 변경 시 증가시키는 방식으로 "전체 기기 로그아웃"을 추가한다.
 """
 import json
 import secrets
@@ -55,6 +59,9 @@ def read_session(token: str) -> dict | None:
         data = json.loads(raw)
     except (InvalidToken, ValueError):
         return None
-    if not isinstance(data, dict) or "uid" not in data or "csrf" not in data:
+    if not isinstance(data, dict):
+        return None
+    # 타입까지 검증: uid 는 int, csrf 는 str (위조는 Fernet 이 막지만 형식 오염 방어).
+    if not isinstance(data.get("uid"), int) or not isinstance(data.get("csrf"), str):
         return None
     return data
