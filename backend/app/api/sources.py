@@ -6,9 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from tortoise.exceptions import IntegrityError
 
+from app import poller
 from app.api.deps import require_admin, require_csrf
 from app.api.schemas import PatchModel
 from app.models import HealthStatus, Source, SourceType, User
+from app.sources import get_adapter
 
 router = APIRouter(
     prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin)]
@@ -50,6 +52,11 @@ async def list_sources() -> list[SourceOut]:
 async def create_source(
     body: SourceIn, admin: Annotated[User, Depends(require_admin)]
 ) -> SourceOut:
+    if get_adapter(body.type) is None:
+        # 어댑터 미구현 타입을 "정상(ok)"으로 보이게 등록만 되는 상태 방지(silent skip).
+        raise HTTPException(
+            status_code=422, detail=f"아직 지원되지 않는 소스 타입입니다: {body.type.value}"
+        )
     s = await Source.create(
         user=admin, type=body.type, config=body.config,
         poll_interval_sec=body.poll_interval_sec,
@@ -59,12 +66,16 @@ async def create_source(
 
 @router.patch("/{source_id}", dependencies=[Depends(require_csrf)])
 async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
+    changes = body.model_dump(exclude_unset=True)
+    # 부분 UPDATE 만 실행 — 전체 save() 는 poller 가 방금 갱신한 last_polled_at·
+    # health_status 등을 stale 값으로 되돌리는 lost-update 를 만든다(적대 리뷰 H5).
+    if changes:
+        updated = await Source.filter(id=source_id).update(**changes)
+        if not updated:
+            raise HTTPException(status_code=404, detail="소스가 없습니다")
     s = await Source.get_or_none(id=source_id)
     if s is None:
         raise HTTPException(status_code=404, detail="소스가 없습니다")
-    for field, value in body.model_dump(exclude_unset=True).items():
-        setattr(s, field, value)
-    await s.save()
     return SourceOut.model_validate(s)
 
 
@@ -81,3 +92,4 @@ async def delete_source(source_id: int) -> None:
         ) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="소스가 없습니다")
+    poller.forget_source(source_id)

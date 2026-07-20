@@ -64,7 +64,14 @@ async def list_matches(
         q = q.filter(source_id=source_id)
     total = await q.count()
     items = await q.order_by("-matched_at", "-id").offset((page - 1) * size).limit(size)
-    return MatchListOut(items=[MatchOut.model_validate(m) for m in items], total=total)
+    out = []
+    for m in items:
+        row = MatchOut.model_validate(m)
+        # 목록은 요약만(최대 500자) — 전체 본문은 상세 API 에서. (응답 크기 상한)
+        if len(row.content) > 500:
+            row = row.model_copy(update={"content": row.content[:500]})
+        out.append(row)
+    return MatchListOut(items=out, total=total)
 
 
 @router.get("/{match_id}")

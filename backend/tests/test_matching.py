@@ -25,13 +25,16 @@ def test_regex_match():
     assert find_match("환영합니다", kws) is None
 
 
-def test_redos_pattern_times_out_without_hanging():
+def test_redos_pattern_times_out_without_hanging(caplog):
     # catastrophic backtracking 패턴 + 불일치 입력 — 타임아웃으로 skip 되고 멈추지 않아야 함
     evil = _kw(r"(a+)+$", MatchType.regex)
-    content = "a" * 40 + "b"
+    content = "a" * 500 + "b"  # 실측: 이 길이부터 0.1초 타임아웃이 실제로 발동
     start = time.monotonic()
-    assert find_match(content, [evil]) is None
+    with caplog.at_level("WARNING"):
+        assert find_match(content, [evil]) is None
     assert time.monotonic() - start < 2.0
+    # 실제로 타임아웃 경로를 탔는지 로그로 확인(그냥 불일치로 끝난 게 아니라)
+    assert any("regex 타임아웃" in r.message for r in caplog.records)
 
 
 def test_invalid_regex_skipped():

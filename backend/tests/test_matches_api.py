@@ -59,5 +59,21 @@ async def test_detail_and_404(reviewer_env):
     assert (await client.get("/api/matches/999999999")).status_code == 404
 
 
+async def test_list_truncates_content_detail_full(reviewer_env):
+    client, source, _ = reviewer_env
+    long_content = "가" * 1200
+    post = await MatchedPost.create(
+        source=source, external_post_id=f"long-{uuid.uuid4().hex[:8]}", content=long_content
+    )
+    try:
+        r = await client.get("/api/matches", params={"source_id": source.id, "size": 100})
+        item = next(i for i in r.json()["items"] if i["id"] == post.id)
+        assert len(item["content"]) == 500  # 목록은 요약만
+        r = await client.get(f"/api/matches/{post.id}")
+        assert r.json()["content"] == long_content  # 상세는 전체
+    finally:
+        await post.delete()
+
+
 async def test_matches_requires_auth(api_client):
     assert (await api_client.get("/api/matches")).status_code == 401

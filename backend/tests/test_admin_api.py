@@ -65,6 +65,13 @@ async def test_sources_crud_roundtrip(admin_session):
     assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 404
 
 
+async def test_source_unsupported_type_422(admin_session):
+    # 어댑터 미구현 타입은 등록 자체를 거부 — "정상처럼 보이는데 수집 안 됨" 방지
+    client, csrf = admin_session
+    r = await client.post("/api/sources", json={"type": "threads"}, headers=csrf)
+    assert r.status_code == 422
+
+
 async def test_source_poll_interval_floor(admin_session):
     # 예의 있는 수집: 60초 미만 폴링 거부 (불변식 ④)
     client, csrf = admin_session

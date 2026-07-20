@@ -13,7 +13,7 @@ from tortoise.expressions import Q
 
 from app import matching
 from app.models import HealthStatus, Keyword, MatchedPost, Source
-from app.sources import FetchError, RateLimitedError, get_adapter
+from app.sources import RateLimitedError, get_adapter
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,11 @@ def _is_due(source: Source, now: datetime) -> bool:
     return source.last_polled_at + timedelta(seconds=source.poll_interval_sec) <= now
 
 
+def forget_source(source_id: int) -> None:
+    """소스 삭제 시 실패 카운터 정리(미세 누수 방지)."""
+    _fail_counts.pop(source_id, None)
+
+
 async def poll_tick() -> None:
     """스케줄러 진입점 — 폴링 주기가 도래한 소스만 순차 수집."""
     now = _now()
@@ -47,52 +52,56 @@ async def poll_tick() -> None:
         try:
             await poll_source(source)
         except Exception:
-            # 한 소스의 실패(저장 오류 포함)가 다른 소스 폴링을 막지 않는다.
-            # 커서는 전진하지 않았으므로 다음 tick 에 같은 구간을 재시도한다.
-            logger.exception("소스 폴링 실패 source=%s", source.id)
+            # poll_source 가 자체 회계를 하므로 여기는 최후 방어선일 뿐이다.
+            logger.exception("소스 폴링 실패(미회계 경로) source=%s", source.id)
 
 
 async def poll_source(source: Source) -> int:
-    """소스 1개 수집. 저장된 매칭 글 수를 반환."""
+    """소스 1개 수집. 저장 시도한 매칭 글 수를 반환(dedup 무시분 포함)."""
     adapter = get_adapter(source.type)
+    # 폴링 시각을 먼저 커밋 — 이후 어떤 단계가 실패해도 poll_interval 은 지켜진다
+    # (저장 실패가 매 tick 재요청 루프가 되던 경로 봉합 — 불변식 ④, 적대 리뷰 H4).
     source.last_polled_at = _now()
+    await source.save(update_fields=["last_polled_at"])
     if adapter is None:
-        await source.save(update_fields=["last_polled_at"])
         return 0
 
     try:
         posts = await adapter.fetch(source, source.last_success_at)
-    except RateLimitedError:
-        await _record_failure(source, rate_limited=True)
+        stored = await _store_matches(source, posts)
+    except RateLimitedError as exc:
+        await _record_failure(source, retry_after_sec=exc.retry_after_sec, rate_limited=True)
         return 0
-    except FetchError:
-        await _record_failure(source, rate_limited=False)
+    except Exception:
+        # fetch 실패(FetchError)든 저장 실패든 동일하게 회계한다 — 커서 미전진 + health 반영.
+        logger.exception("소스 수집/저장 실패 source=%s", source.id)
+        await _record_failure(source, retry_after_sec=None, rate_limited=False)
         return 0
-
-    stored = await _store_matches(source, posts)
 
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
     _fail_counts.pop(source.id, None)
     source.last_success_at = source.last_polled_at
     source.health_status = HealthStatus.ok
     source.backoff_until = None
-    await source.save(
-        update_fields=["last_polled_at", "last_success_at", "health_status", "backoff_until"]
-    )
+    await source.save(update_fields=["last_success_at", "health_status", "backoff_until"])
     return stored
 
 
-async def _record_failure(source: Source, *, rate_limited: bool) -> None:
+async def _record_failure(
+    source: Source, *, retry_after_sec: float | None, rate_limited: bool
+) -> None:
     count = _fail_counts.get(source.id, 0) + 1
     _fail_counts[source.id] = count
     source.health_status = (
         HealthStatus.down if count >= _DOWN_AFTER_FAILURES else HealthStatus.degraded
     )
     if rate_limited:
-        # 429/403 지수 backoff (FR-4)
+        # 429/403 지수 backoff (FR-4). 서버의 Retry-After 가 더 길면 그쪽을 존중.
         delay = min(_BACKOFF_BASE_SEC * 2 ** (count - 1), _BACKOFF_CAP_SEC)
+        if retry_after_sec:
+            delay = max(delay, min(retry_after_sec, 24 * 3600))
         source.backoff_until = _now() + timedelta(seconds=delay)
-    await source.save(update_fields=["last_polled_at", "health_status", "backoff_until"])
+    await source.save(update_fields=["health_status", "backoff_until"])
 
 
 async def _store_matches(source: Source, posts: list) -> int:
@@ -117,8 +126,9 @@ async def _store_matches(source: Source, posts: list) -> int:
             MatchedPost(
                 source=source,
                 external_post_id=post.external_post_id[:512],
-                author=post.author,
-                url=post.url,
+                # 어댑터가 절단하지 못한 경우의 모델 제약 방어(배치 전체 실패 방지)
+                author=post.author[:255] if post.author else None,
+                url=post.url[:1024] if post.url else None,
                 content=post.content,
                 content_hash=hashlib.sha256(post.content.encode()).hexdigest(),
                 matched_keyword=kw,

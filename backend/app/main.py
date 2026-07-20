@@ -1,5 +1,6 @@
 import logging
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from cryptography.fernet import Fernet
@@ -78,8 +79,15 @@ async def health():
         logging.getLogger(__name__).exception("health: DB 왕복 실패")
         return {"status": "degraded", "db": "error"}
     last_tick = poller.state["last_tick"]
+    # tick 이 돌다가 오래 멈췄으면 전체 상태에 반영(silent failure 방지).
+    # 기동 직후(last_tick=None)는 첫 tick 전이므로 degraded 로 치지 않는다.
+    poller_stale = (
+        settings.poller_enabled
+        and last_tick is not None
+        and (datetime.now(UTC) - last_tick).total_seconds() > settings.poller_tick_sec * 5
+    )
     return {
-        "status": "ok",
+        "status": "degraded" if poller_stale else "ok",
         "db": "ok",
         # poller heartbeat + 소스별 상태 배지 (FR-17·18)
         "poller": {

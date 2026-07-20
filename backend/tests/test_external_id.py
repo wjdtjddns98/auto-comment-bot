@@ -7,16 +7,27 @@ TS = datetime(2026, 7, 20, 12, 0, 0, tzinfo=UTC)
 
 
 def test_url_variants_same_id():
-    # 쿼리스트링·http↔https·말미 슬래시·호스트 대소문자 → 동일 ID
+    # 추적 파라미터·http↔https·말미 슬래시·호스트 대소문자·프래그먼트 → 동일 ID
     variants = [
         "https://cafe.example.com/post/123",
         "http://cafe.example.com/post/123",
         "https://CAFE.example.com/post/123/",
-        "https://cafe.example.com/post/123?ref=share&utm_source=x",
+        "https://cafe.example.com/post/123?ref=share&utm_source=x&fbclid=abc",
         "https://cafe.example.com/post/123#comment",
     ]
     ids = {stable_external_id(u, "author1", TS) for u in variants}
     assert len(ids) == 1
+
+
+def test_query_identified_posts_not_merged():
+    # ?id=N 처럼 쿼리가 게시물 식별자인 게시판 URL — 서로 다른 글은 다른 ID (리뷰 H2-a)
+    a = stable_external_id("https://forum.ex.com/view.php?id=1", "author", None)
+    b = stable_external_id("https://forum.ex.com/view.php?id=2", "author", None)
+    assert a != b
+    # 같은 글: 식별 쿼리는 유지 + 추적 파라미터만 제거 + 순서 무관
+    c = stable_external_id("https://forum.ex.com/view.php?id=1&utm_source=x", "author", None)
+    d = stable_external_id("http://forum.ex.com/view.php?utm_medium=y&id=1", "author", None)
+    assert a == c == d
 
 
 def test_different_post_different_id():
@@ -29,9 +40,9 @@ def test_different_post_different_id():
 def test_timestamp_excluded_when_absent():
     # 게시시각 미노출 소스: URL+author 만으로 결정 (MUST-FIX #2)
     a = stable_external_id("https://ex.com/p/1", "author1", None)
-    b = stable_external_id("https://ex.com/p/1?q=1", "author1", None)
+    b = stable_external_id("https://ex.com/p/1?utm_source=share", "author1", None)
     assert a == b
 
 
 def test_normalize_url():
-    assert normalize_url("HTTPS://Ex.Com/a/b/?x=1") == "ex.com/a/b"
+    assert normalize_url("HTTPS://Ex.Com/a/b/?x=1&utm_source=s") == "ex.com/a/b?x=1"
