@@ -49,14 +49,7 @@ export default function App() {
             </AdminRoute>
           }
         />
-        <Route
-          path="/admin/sns-accounts"
-          element={
-            <AdminRoute>
-              <AdminSnsAccountsPage />
-            </AdminRoute>
-          }
-        />
+        <Route path="/sns-accounts" element={<AdminSnsAccountsPage />} />
         <Route path="/audit-log" element={<AuditLogPage />} />
         <Route path="/debug/health" element={<DebugHealthPage />} />
       </Route>

@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createSnsAccount, deleteSnsAccount, getSnsAccounts } from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
 import { formatDateTime, SOURCE_TYPE_LABEL } from "../lib/matchDisplay";
+import { useAuth } from "../hooks/useAuth";
 import type { SnsPlatform } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -81,6 +82,8 @@ function CreateSnsAccountForm() {
 }
 
 export default function AdminSnsAccountsPage() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === "admin";
   const queryClient = useQueryClient();
   const { data: accounts, isLoading, isError } = useQuery({
     queryKey: ["snsAccounts"],
@@ -97,12 +100,17 @@ export default function AdminSnsAccountsPage() {
     onError: (err, id) => setRowError({ id, message: describeApiError(err) }),
   });
 
+  const columnCount = isAdmin ? 6 : 5;
+
   return (
     <section className="flex flex-col gap-6">
       <div>
-        <h1 className="text-xl font-semibold text-gray-900">SNS 계정 관리</h1>
+        <h1 className="text-xl font-semibold text-gray-900">SNS 계정</h1>
         <p className="text-sm text-gray-500">
-          답변 전송에 사용할 SNS 계정을 등록·삭제합니다. 자격증명은 어떤 응답에도 포함되지 않습니다.
+          {isAdmin
+            ? "전체 사용자의 SNS 계정을 조회합니다. 등록·삭제는 각자 자신의 계정만 가능합니다."
+            : "답변 전송에 사용할 내 SNS 계정을 등록·삭제합니다."}{" "}
+          자격증명은 어떤 응답에도 포함되지 않습니다.
         </p>
       </div>
 
@@ -117,6 +125,7 @@ export default function AdminSnsAccountsPage() {
             <Tr>
               <Th>플랫폼</Th>
               <Th>표시 이름</Th>
+              {isAdmin && <Th>소유자</Th>}
               <Th>상태</Th>
               <Th>토큰 만료</Th>
               <Th />
@@ -125,7 +134,7 @@ export default function AdminSnsAccountsPage() {
           <Tbody>
             {accounts.length === 0 && (
               <Tr>
-                <Td colSpan={5} className="py-8 text-center text-gray-400">
+                <Td colSpan={columnCount} className="py-8 text-center text-gray-400">
                   등록된 SNS 계정이 없습니다.
                 </Td>
               </Tr>
@@ -135,6 +144,11 @@ export default function AdminSnsAccountsPage() {
                 <Tr className="hover:bg-gray-50">
                   <Td>{SOURCE_TYPE_LABEL[account.platform] ?? account.platform}</Td>
                   <Td>{account.display_name}</Td>
+                  {isAdmin && (
+                    <Td>
+                      {account.user_id === user?.id ? "나" : `사용자 #${account.user_id}`}
+                    </Td>
+                  )}
                   <Td>
                     <Badge tone={account.status === "active" ? "success" : "warning"}>
                       {account.status}
@@ -145,7 +159,7 @@ export default function AdminSnsAccountsPage() {
                     <Button
                       size="sm"
                       variant="danger"
-                      disabled={deleteMutation.isPending}
+                      disabled={deleteMutation.isPending || (isAdmin && account.user_id !== user?.id)}
                       onClick={() => deleteMutation.mutate(account.id)}
                     >
                       삭제
@@ -154,7 +168,7 @@ export default function AdminSnsAccountsPage() {
                 </Tr>
                 {rowError?.id === account.id && (
                   <Tr>
-                    <Td colSpan={5} className="text-sm text-tone-danger">
+                    <Td colSpan={columnCount} className="text-sm text-tone-danger">
                       {rowError.message}
                     </Td>
                   </Tr>

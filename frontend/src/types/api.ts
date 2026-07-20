@@ -91,6 +91,7 @@ export type SnsPlatform = "threads" | "naver_cafe" | "community";
 
 export interface SnsAccount {
   id: number;
+  user_id: number;
   platform: SnsPlatform;
   display_name: string;
   status: string;

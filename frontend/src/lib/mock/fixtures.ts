@@ -77,10 +77,19 @@ export const MOCK_TEMPLATES: Template[] = [
 export const MOCK_SNS_ACCOUNTS: SnsAccount[] = [
   {
     id: 1,
+    user_id: 2,
     platform: "threads",
     display_name: "@nutti_official",
     status: "active",
     token_expires_at: "2026-09-01T00:00:00Z",
+  },
+  {
+    id: 2,
+    user_id: 1,
+    platform: "naver_cafe",
+    display_name: "누띠_어드민",
+    status: "active",
+    token_expires_at: "2026-08-15T00:00:00Z",
   },
 ];
 
