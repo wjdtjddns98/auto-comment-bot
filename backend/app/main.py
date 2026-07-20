@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from tortoise import Tortoise, connections
 
-from app import poller
+from app import poller, reply
 from app.api.auth import router as auth_router
 from app.api.keywords import router as keywords_router
 from app.api.matches import router as matches_router
@@ -42,6 +42,9 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(poller.poll_tick, "interval",
                           seconds=settings.poller_tick_sec,
                           id="poller", replace_existing=True)
+    # sending 정체 회수(PRD §7): approve 중 크래시로 고착된 매칭을 reviewing 으로.
+    scheduler.add_job(reply.sweep_stuck_sending, "interval",
+                      seconds=60, id="sending_sweep", replace_existing=True)
     if scheduler.get_jobs():
         scheduler.start()
     yield
