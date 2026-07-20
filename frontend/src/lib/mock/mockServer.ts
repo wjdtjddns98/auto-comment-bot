@@ -210,7 +210,9 @@ function handleRetry(id: number): ApproveMatchResponse {
 
 function handleGetSources(): Source[] {
   requireUser();
-  return sources;
+  // 배열을 그대로 반환하면 create/patch/delete 가 같은 참조를 in-place 로 변형해
+  // React Query 의 구조적 공유(structural sharing)가 "변경 없음"으로 오판해 리렌더가 누락된다.
+  return [...sources];
 }
 
 function handleCreateSource(body: unknown): Source {
@@ -242,6 +244,12 @@ function handleDeleteSource(id: number): void {
   requireUser();
   const idx = sources.findIndex((s) => s.id === id);
   if (idx === -1) throw new MockApiError(404, "소스를 찾을 수 없습니다.");
+  if (matchedPosts.some((m) => m.source_id === id)) {
+    throw new MockApiError(409, "매칭 이력이 있는 소스는 삭제할 수 없습니다. 비활성화를 사용하세요.");
+  }
+  if (keywords.some((k) => k.source_scope === id)) {
+    throw new MockApiError(409, "이 소스를 범위로 지정한 키워드가 있어 삭제할 수 없습니다. 비활성화를 사용하세요.");
+  }
   sources.splice(idx, 1);
 }
 
@@ -249,7 +257,7 @@ function handleDeleteSource(id: number): void {
 
 function handleGetKeywords(): Keyword[] {
   requireUser();
-  return keywords;
+  return [...keywords];
 }
 
 function handleCreateKeyword(body: unknown): Keyword {
@@ -283,6 +291,9 @@ function handleDeleteKeyword(id: number): void {
   requireUser();
   const idx = keywords.findIndex((k) => k.id === id);
   if (idx === -1) throw new MockApiError(404, "키워드를 찾을 수 없습니다.");
+  if (matchedPosts.some((m) => m.matched_keyword_id === id)) {
+    throw new MockApiError(409, "매칭 이력이 있는 키워드는 삭제할 수 없습니다. 비활성화를 사용하세요.");
+  }
   keywords.splice(idx, 1);
 }
 
@@ -290,7 +301,7 @@ function handleDeleteKeyword(id: number): void {
 
 function handleGetTemplates(): Template[] {
   requireUser();
-  return templates;
+  return [...templates];
 }
 
 function handleCreateTemplate(body: unknown): Template {
@@ -320,7 +331,7 @@ function handleDeleteTemplate(id: number): void {
 
 function handleGetSnsAccounts(): SnsAccount[] {
   requireUser();
-  return snsAccounts;
+  return [...snsAccounts];
 }
 
 function handleCreateSnsAccount(body: unknown): SnsAccount {

@@ -1,11 +1,18 @@
 import type {
   ApproveMatchRequest,
   ApproveMatchResponse,
+  CreateKeywordRequest,
+  CreateSnsAccountRequest,
+  CreateSourceRequest,
+  CreateTemplateRequest,
   Health,
   Keyword,
   MatchDetail,
   MatchListResponse,
   MatchedPostStatus,
+  PatchKeywordRequest,
+  PatchSourceRequest,
+  PatchTemplateRequest,
   ReplyAction,
   Source,
   SnsAccount,
@@ -153,9 +160,34 @@ export const retryMatch = (id: number) =>
 
 // --- 관리 (admin) ---
 export const getSources = () => request<Source[]>("/api/sources");
+export const createSource = (body: CreateSourceRequest) =>
+  request<Source>("/api/sources", { method: "POST", body });
+export const patchSource = (id: number, body: PatchSourceRequest) =>
+  request<Source>(`/api/sources/${id}`, { method: "PATCH", body });
+export const deleteSource = (id: number) =>
+  request<void>(`/api/sources/${id}`, { method: "DELETE" });
+
 export const getKeywords = () => request<Keyword[]>("/api/keywords");
+export const createKeyword = (body: CreateKeywordRequest) =>
+  request<Keyword>("/api/keywords", { method: "POST", body });
+export const patchKeyword = (id: number, body: PatchKeywordRequest) =>
+  request<Keyword>(`/api/keywords/${id}`, { method: "PATCH", body });
+export const deleteKeyword = (id: number) =>
+  request<void>(`/api/keywords/${id}`, { method: "DELETE" });
+
 export const getTemplates = () => request<Template[]>("/api/templates");
+export const createTemplate = (body: CreateTemplateRequest) =>
+  request<Template>("/api/templates", { method: "POST", body });
+export const patchTemplate = (id: number, body: PatchTemplateRequest) =>
+  request<Template>(`/api/templates/${id}`, { method: "PATCH", body });
+export const deleteTemplate = (id: number) =>
+  request<void>(`/api/templates/${id}`, { method: "DELETE" });
+
 export const getSnsAccounts = () => request<SnsAccount[]>("/api/sns-accounts");
+export const createSnsAccount = (body: CreateSnsAccountRequest) =>
+  request<SnsAccount>("/api/sns-accounts", { method: "POST", body });
+export const deleteSnsAccount = (id: number) =>
+  request<void>(`/api/sns-accounts/${id}`, { method: "DELETE" });
 
 // --- 감사 로그 ---
 export const getReplyActions = (matchId: number) =>

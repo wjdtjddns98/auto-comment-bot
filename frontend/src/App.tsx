@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./components/Layout";
 import { ProtectedRoute } from "./routes/ProtectedRoute";
+import { AdminRoute } from "./routes/AdminRoute";
 import LoginPage from "./pages/LoginPage";
 import DashboardPage from "./pages/DashboardPage";
 import MatchDetailPage from "./pages/MatchDetailPage";
@@ -24,10 +25,38 @@ export default function App() {
       >
         <Route path="/" element={<DashboardPage />} />
         <Route path="/matches/:id" element={<MatchDetailPage />} />
-        <Route path="/admin/sources" element={<AdminSourcesPage />} />
-        <Route path="/admin/keywords" element={<AdminKeywordsPage />} />
-        <Route path="/admin/templates" element={<AdminTemplatesPage />} />
-        <Route path="/admin/sns-accounts" element={<AdminSnsAccountsPage />} />
+        <Route
+          path="/admin/sources"
+          element={
+            <AdminRoute>
+              <AdminSourcesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/keywords"
+          element={
+            <AdminRoute>
+              <AdminKeywordsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/templates"
+          element={
+            <AdminRoute>
+              <AdminTemplatesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/sns-accounts"
+          element={
+            <AdminRoute>
+              <AdminSnsAccountsPage />
+            </AdminRoute>
+          }
+        />
         <Route path="/audit-log" element={<AuditLogPage />} />
         <Route path="/debug/health" element={<DebugHealthPage />} />
       </Route>

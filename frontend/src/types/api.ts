@@ -34,6 +34,18 @@ export interface Source {
   backoff_until: string | null;
 }
 
+export interface CreateSourceRequest {
+  type: SourceType;
+  config: Record<string, unknown>;
+  poll_interval_sec: number;
+}
+
+export interface PatchSourceRequest {
+  enabled?: boolean;
+  poll_interval_sec?: number;
+  config?: Record<string, unknown>;
+}
+
 export type MatchType = "substring" | "regex";
 
 export interface Keyword {
@@ -44,11 +56,35 @@ export interface Keyword {
   source_scope: number | null;
 }
 
+export interface CreateKeywordRequest {
+  pattern: string;
+  match_type: MatchType;
+  source_scope?: number | null;
+}
+
+export interface PatchKeywordRequest {
+  pattern?: string;
+  match_type?: MatchType;
+  enabled?: boolean;
+  source_scope?: number | null;
+}
+
 export interface Template {
   id: number;
   name: string;
   body: string;
   enabled: boolean;
+}
+
+export interface CreateTemplateRequest {
+  name: string;
+  body: string;
+}
+
+export interface PatchTemplateRequest {
+  name?: string;
+  body?: string;
+  enabled?: boolean;
 }
 
 export type SnsPlatform = "threads" | "naver_cafe" | "community";
@@ -59,6 +95,12 @@ export interface SnsAccount {
   display_name: string;
   status: string;
   token_expires_at: string | null;
+}
+
+export interface CreateSnsAccountRequest {
+  platform: SnsPlatform;
+  display_name: string;
+  credentials: Record<string, unknown>;
 }
 
 export type MatchedPostStatus =
