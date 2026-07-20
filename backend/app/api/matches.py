@@ -219,7 +219,9 @@ async def _approve(
         # 로그와 상태 전이는 한 트랜잭션 — 로그만 남고 sending 고착되는 창 제거(1차 리뷰 #6)
         async with in_transaction():
             await _log(action=ReplyAction.approved)
-            await _fenced().update(status=PostStatus.replied)
+            fenced = await _fenced().update(status=PostStatus.replied)
+        if not fenced:
+            logger.warning("approved 기록 시점에 클레임 소유권 상실 — 상태 미변경 match=%s", match_id)
         return ApproveOut(action="approved", clipboard_body=body.final_body)
 
     try:
@@ -280,15 +282,19 @@ async def retry_match(
 async def ignore_match(
     match_id: int, user: Annotated[User, Depends(current_user)]
 ) -> dict:
-    changed = await MatchedPost.filter(
-        id=match_id, status__in=[PostStatus.new, PostStatus.reviewing]
-    ).update(status=PostStatus.ignored)
+    # 상태 전이 + audit 을 한 트랜잭션으로 — "ignored 인데 기록 없음" 창 제거(2차 리뷰 M1)
+    async with in_transaction():
+        changed = await MatchedPost.filter(
+            id=match_id, status__in=[PostStatus.new, PostStatus.reviewing]
+        ).update(status=PostStatus.ignored)
+        if changed:
+            # 무시도 사람의 의사결정 — 누가/언제 응답하지 않기로 했는지 audit 에 남긴다
+            await ReplyActionLog.create(
+                matched_post_id=match_id, reviewer=user, final_body="",
+                action=ReplyAction.canceled,
+            )
     if not changed:
         if not await MatchedPost.exists(id=match_id):
             raise HTTPException(status_code=404, detail="매칭 글이 없습니다")
         raise HTTPException(status_code=409, detail="처리 중이거나 완료된 매칭은 무시할 수 없습니다")
-    # 무시도 사람의 의사결정 — 누가/언제 응답하지 않기로 했는지 audit 에 남긴다(1차 리뷰 #5)
-    await ReplyActionLog.create(
-        matched_post_id=match_id, reviewer=user, final_body="", action=ReplyAction.canceled
-    )
     return {"status": "ignored"}

@@ -362,6 +362,52 @@ async def test_zombie_approve_does_not_override_ignore(reviewer_session, monkeyp
         await _cleanup(match)
 
 
+async def test_zombie_does_not_override_active_reclaim(reviewer_session, monkeypatch):
+    """펜싱 timestamp 조건 검증(2차 리뷰 M2): sweep 회수 후 재클레임(retry, 새 클레임
+    시각 T2)이 진행 중일 때, 뒤늦게 완료된 T1 좀비가 T2 의 sending 상태를 덮어쓰지
+    못한다 — status 체크만으로는 통과 못 하고 sending_claimed_at 비교가 있어야 한다."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter(delay=1.0)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    match = await _make_match(user, SourceType.threads)
+    try:
+        zombie = asyncio.create_task(
+            client.post(
+                f"/api/matches/{match.id}/approve", json={"final_body": "T1"}, headers=csrf
+            )
+        )
+        await asyncio.sleep(0.3)  # T1 클레임 후, 전송 완료 전
+        # sweep 고착 회수 재현 → 사람이 retry 로 재클레임(T2, 전송 1.5초 진행)
+        assert await MatchedPost.filter(id=match.id, status=PostStatus.sending).update(
+            status=PostStatus.reviewing
+        ) == 1
+        adapter.delay = 1.5
+        reclaim = asyncio.create_task(
+            client.post(
+                f"/api/matches/{match.id}/retry", json={"final_body": "T2"}, headers=csrf
+            )
+        )
+        await asyncio.sleep(0.2)
+        await match.refresh_from_db()
+        assert match.status == PostStatus.sending  # T2 클레임 상태
+
+        r1 = await zombie  # T1 이 T2 전송 도중 완료됨
+        assert r1.status_code == 200 and r1.json()["action"] == "sent"
+        await match.refresh_from_db()
+        # 핵심: T1 의 fenced update 는 (status=sending 이지만 claimed_at=T2 라서) 0행 —
+        # T2 의 진행 중 상태를 덮어쓰지 않는다
+        assert match.status == PostStatus.sending
+
+        r2 = await reclaim  # T2 는 sent 기록 시점에 partial unique 충돌 → 409 정합 회복
+        assert r2.status_code == 409
+        await match.refresh_from_db()
+        assert match.status == PostStatus.replied
+        sent = await ReplyActionLog.filter(matched_post_id=match.id, action=ReplyAction.sent)
+        assert len(sent) == 1  # DB 는 끝까지 sent 1건만 허용(불변식 ②)
+    finally:
+        await _cleanup(match)
+
+
 def test_uvicorn_single_worker_config():
     """테스트 게이트 ④: uvicorn 멀티워커 금지 — in-process 스케줄러 중복 실행 방지."""
     dockerfile = (Path(__file__).parent.parent / "Dockerfile").read_text(encoding="utf-8")

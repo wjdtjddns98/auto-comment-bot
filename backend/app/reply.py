@@ -42,6 +42,6 @@ async def sweep_stuck_sending() -> int:
     n = await MatchedPost.filter(_stuck_q(cutoff), id__in=ids).update(
         status=PostStatus.reviewing
     )
-    # 사후 추적 가능하게 회수 대상 id 를 남긴다(1차 리뷰 #9)
-    logger.warning("sending 고착 %d건 회수 → reviewing ids=%s", n, ids)
+    # 사후 추적용 — SELECT~UPDATE 사이 상태가 바뀐 행은 제외되므로 ids 는 후보 목록이다
+    logger.warning("sending 고착 회수 %d/%d건 → reviewing 후보 ids=%s", n, len(ids), ids)
     return n
