@@ -59,6 +59,9 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   query?: Record<string, string | number | undefined>;
+  // /api/auth/login 전용: 로그인 전엔 세션 쿠키가 없어 /api/auth/csrf 가 401을 낸다
+  // (백엔드도 login 라우트엔 require_csrf 를 걸지 않음 — app/api/auth.py 참조).
+  skipCsrf?: boolean;
 }
 
 function buildUrl(path: string, query?: RequestOptions["query"]): string {
@@ -77,7 +80,7 @@ async function request<T>(
   retryOn403 = true
 ): Promise<T> {
   const method = options.method ?? "GET";
-  const isMutating = MUTATING_METHODS.has(method);
+  const isMutating = MUTATING_METHODS.has(method) && !options.skipCsrf;
 
   if (MOCK_ENABLED) {
     try {
@@ -130,7 +133,7 @@ async function request<T>(
 export const getHealth = () => request<Health>("/health");
 export const getMe = () => request<User>("/api/auth/me");
 export const login = (email: string, password: string) =>
-  request<User>("/api/auth/login", { method: "POST", body: { email, password } });
+  request<User>("/api/auth/login", { method: "POST", body: { email, password }, skipCsrf: true });
 export const logout = () => request<void>("/api/auth/logout", { method: "POST" });
 
 // --- 매칭 (reviewer) ---
