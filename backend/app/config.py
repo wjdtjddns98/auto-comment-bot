@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -23,6 +24,10 @@ class Settings(BaseSettings):
     session_ttl_sec: int = 60 * 60 * 24 * 7  # 7일
     # SNS 자격증명 암호화 키(쉼표 구분, 첫 키=암호화·나머지=복호 전용 — 회전 경로 NFR-S2).
     credentials_fernet_keys: str = ""
+
+    # poller (M1). tick 은 "폴링 주기 도래 판정" 주기 — 소스별 실제 주기는 poll_interval_sec.
+    poller_enabled: bool = True
+    poller_tick_sec: int = Field(default=30, ge=1)
 
     @property
     def cookie_secure(self) -> bool:
