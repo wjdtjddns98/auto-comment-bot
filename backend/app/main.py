@@ -7,6 +7,10 @@ from fastapi import FastAPI
 from tortoise import Tortoise, connections
 
 from app.api.auth import router as auth_router
+from app.api.keywords import router as keywords_router
+from app.api.sns_accounts import router as sns_accounts_router
+from app.api.sources import router as sources_router
+from app.api.templates import router as templates_router
 from app.config import settings
 from app.db import TORTOISE_ORM
 from app.integrations.notion import post_daily
@@ -36,6 +40,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="SNS Keyword Monitor", lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(sources_router)
+app.include_router(keywords_router)
+app.include_router(templates_router)
+app.include_router(sns_accounts_router)
 
 
 @app.get("/health")
