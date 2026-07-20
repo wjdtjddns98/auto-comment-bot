@@ -15,6 +15,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# paths-filter 가 PR 변경 파일을 GitHub API 로 조회한다 — pull-requests: read 필수
+# (없으면 "Resource not accessible by integration" 으로 changes 잡이 실패).
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   changes:
     name: 변경 영역 감지
@@ -48,19 +54,17 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: backend/requirements-dev.txt
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install dependencies (uv, 락파일 고정)
+        run: uv sync --locked
       - name: Lint (ruff)
-        run: ruff check .
+        run: uv run ruff check .
       - name: Test (pytest, DB 불필요)
-        run: pytest
+        run: uv run pytest -m "not db"
 
   pg-migration:
     name: PostgreSQL 마이그레이션 적용
@@ -86,17 +90,17 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: backend/requirements-dev.txt
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+      - name: Install dependencies (uv, 락파일 고정)
+        run: uv sync --locked
       - name: aerich 마이그레이션 적용(실 PG)
-        run: aerich upgrade
+        run: uv run aerich upgrade
+      - name: DB 통합 테스트 (pytest -m db, 마이그레이션 적용된 스키마 대상)
+        run: uv run pytest -m db
 
   frontend-build:
     name: 프론트엔드 빌드(타입체크)
@@ -121,13 +125,15 @@ jobs:
   ci-ok:
     name: CI Gate
     # 브랜치 보호에서 required 로 거는 **유일한** 체크.
-    needs: [test, pg-migration, frontend-build]
+    # changes 잡도 집계에 포함 — changes 실패 시 모든 테스트 잡이 skip 되는데
+    # skip=통과 규칙만 있으면 게이트가 헛green 이 된다(실제 발생했던 구멍).
+    needs: [changes, test, pg-migration, frontend-build]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: 관련 잡 결과 집계(skip=통과, failure/cancelled=차단)
         run: |
-          for r in "${{ needs.test.result }}" "${{ needs.pg-migration.result }}" "${{ needs.frontend-build.result }}"; do
+          for r in "${{ needs.changes.result }}" "${{ needs.test.result }}" "${{ needs.pg-migration.result }}" "${{ needs.frontend-build.result }}"; do
             echo "result: $r"
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "::error::필수 잡이 실패/취소됨($r)"

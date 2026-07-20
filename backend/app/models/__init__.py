@@ -59,7 +59,7 @@ class ReplyAction(str, Enum):
 
 
 class User(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     email = fields.CharField(max_length=255, unique=True)
     password_hash = fields.CharField(max_length=255)
     role = fields.CharEnumField(Role, max_length=16)
@@ -70,7 +70,7 @@ class User(Model):
 
 
 class SnsAccount(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user = fields.ForeignKeyField("models.User", related_name="sns_accounts")
     platform = fields.CharEnumField(Platform, max_length=16)
     display_name = fields.CharField(max_length=255)
@@ -85,7 +85,7 @@ class SnsAccount(Model):
 class SnsAccountSecret(Model):
     # 1:1 분리 저장. read path는 이 테이블을 절대 로드하지 않는다 (MUST-FIX #3).
     account = fields.OneToOneField(
-        "models.SnsAccount", related_name="secret", pk=True
+        "models.SnsAccount", related_name="secret", primary_key=True
     )
     encrypted_credentials = fields.BinaryField()
     key_version = fields.IntField(default=1)
@@ -96,7 +96,7 @@ class SnsAccountSecret(Model):
 
 
 class Source(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user = fields.ForeignKeyField("models.User", related_name="sources")
     type = fields.CharEnumField(SourceType, max_length=16)
     config = fields.JSONField()
@@ -114,7 +114,7 @@ class Source(Model):
 
 
 class Keyword(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user = fields.ForeignKeyField("models.User", related_name="keywords")
     pattern = fields.CharField(max_length=512)
     match_type = fields.CharEnumField(MatchType, max_length=16, default=MatchType.substring)
@@ -130,7 +130,7 @@ class Keyword(Model):
 
 
 class MatchedPost(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     source = fields.ForeignKeyField("models.Source", related_name="matched_posts")
     external_post_id = fields.CharField(max_length=512)  # 안정적 ID (FR-3)
     author = fields.CharField(max_length=255, null=True)
@@ -152,7 +152,7 @@ class MatchedPost(Model):
 
 
 class ReplyTemplate(Model):
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     user = fields.ForeignKeyField("models.User", related_name="templates")
     name = fields.CharField(max_length=255)
     body = fields.TextField()
@@ -166,7 +166,7 @@ class ReplyTemplate(Model):
 class ReplyActionLog(Model):
     # append-only 감사 로그. matched_post당 action='sent' 최대 1건을
     # partial unique index로 강제 (별도 마이그레이션, MUST-FIX #1).
-    id = fields.IntField(pk=True)
+    id = fields.IntField(primary_key=True)
     matched_post = fields.ForeignKeyField("models.MatchedPost", related_name="reply_actions")
     reviewer = fields.ForeignKeyField("models.User", related_name="reply_actions")
     template = fields.ForeignKeyField(
