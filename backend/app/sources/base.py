@@ -29,6 +29,10 @@ class FetchError(Exception):
     """그 외 수집 실패(네트워크·파싱·SSRF 차단). health 갱신용."""
 
 
+class SendError(Exception):
+    """답변 전송 실패 — approve 플로우가 failed 회계 + reviewing 복귀 후 502 로 변환한다."""
+
+
 @dataclass(frozen=True)
 class FetchedPost:
     external_post_id: str
@@ -46,6 +50,13 @@ class SourceAdapter(Protocol):
     async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:
         """since(=last_success_at 커서) 이후 글 목록. 활용 여부는 어댑터 재량 —
         보존창 전체를 반환해도 안전하다(dedup 이 중복을 걸러준다)."""
+        ...
+
+    async def send_reply(self, source: Source, post, body: str, account) -> str:
+        """승인된 답변 전송 → external_reply_id 반환. 실패는 SendError.
+
+        can_write=False 어댑터에서는 절대 호출되지 않는다(approve 가 approved 기록으로
+        분기). 호출 경로는 사람 승인(approve/retry) 엔드포인트뿐이다 — 불변식 ①."""
         ...
 
 

@@ -109,9 +109,13 @@ Req `{ template_id?: int, final_body: string, sns_account_id?: int }`
 2. 소스 `can_write=true`: `adapter.send_reply` → 성공 `reply_actions(action='sent', external_reply_id)` + `matched_posts.status='replied'` → **200** `{ action:'sent', external_reply_id }`. 실패 → `reply_actions(action='failed', error)` + status 복귀 `reviewing` → **502** `{ action:'failed', detail }`.
 3. `can_write=false`(네이버/커뮤니티): 전송 안 함. `reply_actions(action='approved')` 기록 + status `replied` → **200** `{ action:'approved', clipboard_body }`(수동 복사용).
 - 멱등성: `reply_actions` partial unique(action='sent')로 DB가 이중 sent 차단. 재요청은 409.
+- 입력 검증(모두 CAS 클레임 전 — 상태 안 건드림): `final_body` 공백뿐이면 422 ·
+  `template_id` 미존재/비활성 422 · `sns_account_id` 는 본인 계정만(admin 전체), 아니면 422.
+- 정체 회수: `sending` 클레임 후 10분 경과 시 sweep 이 `reviewing` 으로 복귀시킨다(재시도 가능).
 
 ### `POST /api/matches/{id}/ignore` (CSRF)
-→ `matched_posts.status='ignored'` → 200.
+→ `matched_posts.status='ignored'` → 200 `{ status: "ignored" }`.
+`new|reviewing` 에서만 가능 — 그 외 409, 없는 매칭 404.
 
 ### `POST /api/matches/{id}/retry` (CSRF)
 전송 실패건 수동 재시도(FR-13). status가 `reviewing`이어야 함 → approve와 동일 CAS 경로 재실행. 새 `reply_actions` 행.
