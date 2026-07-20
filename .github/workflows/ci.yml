@@ -15,6 +15,12 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# paths-filter 가 PR 변경 파일을 GitHub API 로 조회한다 — pull-requests: read 필수
+# (없으면 "Resource not accessible by integration" 으로 changes 잡이 실패).
+permissions:
+  contents: read
+  pull-requests: read
+
 jobs:
   changes:
     name: 변경 영역 감지
@@ -119,13 +125,15 @@ jobs:
   ci-ok:
     name: CI Gate
     # 브랜치 보호에서 required 로 거는 **유일한** 체크.
-    needs: [test, pg-migration, frontend-build]
+    # changes 잡도 집계에 포함 — changes 실패 시 모든 테스트 잡이 skip 되는데
+    # skip=통과 규칙만 있으면 게이트가 헛green 이 된다(실제 발생했던 구멍).
+    needs: [changes, test, pg-migration, frontend-build]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: 관련 잡 결과 집계(skip=통과, failure/cancelled=차단)
         run: |
-          for r in "${{ needs.test.result }}" "${{ needs.pg-migration.result }}" "${{ needs.frontend-build.result }}"; do
+          for r in "${{ needs.changes.result }}" "${{ needs.test.result }}" "${{ needs.pg-migration.result }}" "${{ needs.frontend-build.result }}"; do
             echo "result: $r"
             if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
               echo "::error::필수 잡이 실패/취소됨($r)"
