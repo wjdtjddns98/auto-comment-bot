@@ -227,7 +227,9 @@ async def test_sns_account_secret_never_in_responses(admin_session, monkeypatch)
     assert "encrypted_credentials" not in r.text
     # allowlist: 응답 필드 집합 자체를 고정 — 새 필드가 몰래 실리는 것도 차단
     item = next(a for a in r.json() if a["id"] == account_id)
-    assert set(item) == {"id", "platform", "display_name", "status", "token_expires_at"}
+    assert set(item) == {
+        "id", "user_id", "platform", "display_name", "status", "token_expires_at"
+    }
 
     # 저장은 암호화본으로만 — 평문 substring 부재 + 복호 왕복 일치, 암호문도 응답에 없음
     secret = await SnsAccountSecret.get(account_id=account_id)
@@ -262,14 +264,15 @@ async def test_sns_account_without_key_503(admin_session, monkeypatch):
     assert r.status_code == 503
 
 
-ADMIN_PREFIXES = ["/api/sources", "/api/keywords", "/api/templates", "/api/sns-accounts"]
+# sns-accounts 는 셀프서비스(로그인 사용자 전체 허용)라 admin 전용 목록에서 제외
+ADMIN_PREFIXES = ["/api/sources", "/api/keywords", "/api/templates"]
 
 
 async def test_admin_routes_require_admin_and_csrf(api_client):
-    # 미인증 → 401 (4개 라우터 전부)
-    for prefix in ADMIN_PREFIXES:
+    # 미인증 → 401 (셀프서비스 포함 전부)
+    for prefix in [*ADMIN_PREFIXES, "/api/sns-accounts"]:
         assert (await api_client.get(prefix)).status_code == 401
-    # reviewer → 403 (4개 라우터 전부)
+    # reviewer → admin 라우터는 403, 셀프서비스는 200
     user = await _make_user(Role.reviewer)
     try:
         await api_client.post(
@@ -277,8 +280,55 @@ async def test_admin_routes_require_admin_and_csrf(api_client):
         )
         for prefix in ADMIN_PREFIXES:
             assert (await api_client.get(prefix)).status_code == 403
+        assert (await api_client.get("/api/sns-accounts")).status_code == 200
     finally:
         await user.delete()
+
+
+async def test_sns_account_self_service_ownership(api_client, monkeypatch):
+    """계정 귀속: 본인 것만 보이고/지울 수 있고, admin 은 전체."""
+    monkeypatch.setattr(settings, "credentials_fernet_keys", Fernet.generate_key().decode())
+    owner = await _make_user(Role.reviewer)
+    other = await _make_user(Role.reviewer)
+    admin = await _make_user(Role.admin)
+
+    async def _login(u):
+        await api_client.post("/api/auth/login", json={"email": u.email, "password": PASSWORD})
+        token = (await api_client.get("/api/auth/csrf")).json()["csrf_token"]
+        return {"X-CSRF-Token": token}
+
+    try:
+        # owner(reviewer)가 본인 계정 연동 → 자동 귀속
+        csrf = await _login(owner)
+        r = await api_client.post(
+            "/api/sns-accounts",
+            json={"platform": "threads", "display_name": "내계정", "credentials": {"t": "v"}},
+            headers=csrf,
+        )
+        assert r.status_code == 201 and r.json()["user_id"] == owner.id
+        account_id = r.json()["id"]
+        assert [a["id"] for a in (await api_client.get("/api/sns-accounts")).json()] == [
+            account_id
+        ]
+
+        # 타인(reviewer)에게는 목록에도 안 보이고 삭제도 404 (존재 비노출)
+        csrf = await _login(other)
+        assert (await api_client.get("/api/sns-accounts")).json() == []
+        r = await api_client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)
+        assert r.status_code == 404
+
+        # admin 은 전체 조회 + 삭제 가능
+        csrf = await _login(admin)
+        assert any(
+            a["id"] == account_id for a in (await api_client.get("/api/sns-accounts")).json()
+        )
+        assert (
+            await api_client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)
+        ).status_code == 204
+    finally:
+        await owner.delete()
+        await other.delete()
+        await admin.delete()
 
 
 async def test_write_without_csrf_403(admin_session):
