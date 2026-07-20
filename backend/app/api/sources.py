@@ -73,10 +73,11 @@ async def delete_source(source_id: int) -> None:
     try:
         deleted = await Source.filter(id=source_id).delete()
     except IntegrityError as exc:
-        # matched_posts.source RESTRICT — 이력이 있는 소스는 삭제 불가(감사 보호).
+        # RESTRICT: 매칭 이력(matched_posts) 또는 스코프된 키워드가 남아 있으면 삭제 불가.
         raise HTTPException(
             status_code=409,
-            detail="매칭 이력이 있는 소스는 삭제할 수 없습니다 — enabled=false 로 비활성화하세요",
+            detail="매칭 이력 또는 스코프된 키워드가 있는 소스는 삭제할 수 없습니다"
+            " — 키워드를 먼저 정리하거나 enabled=false 로 비활성화하세요",
         ) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="소스가 없습니다")

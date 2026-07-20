@@ -4,10 +4,22 @@ import uuid
 import pytest
 from cryptography.fernet import Fernet
 
+from tortoise.exceptions import IntegrityError
+
 from app import crypto
 from app.auth import hash_password
 from app.config import settings
-from app.models import MatchedPost, Role, SnsAccount, SnsAccountSecret, Source, User
+from app.models import (
+    MatchedPost,
+    Platform,
+    ReplyAction,
+    ReplyActionLog,
+    Role,
+    SnsAccount,
+    SnsAccountSecret,
+    Source,
+    User,
+)
 
 pytestmark = pytest.mark.db
 
@@ -94,6 +106,10 @@ async def test_patch_explicit_null_422(admin_session):
     # source_scope 는 null 이 유효값(스코프 해제)
     r = await client.patch(f"/api/keywords/{kid}", json={"source_scope": None}, headers=csrf)
     assert r.status_code == 200 and r.json()["source_scope"] is None
+    # 필드명 오타는 조용한 no-op 이 아니라 422 (extra="forbid")
+    assert (
+        await client.patch(f"/api/keywords/{kid}", json={"enabeld": True}, headers=csrf)
+    ).status_code == 422
     await client.delete(f"/api/keywords/{kid}", headers=csrf)
 
 
@@ -114,6 +130,56 @@ async def test_delete_preserves_match_history(admin_session):
         await post.refresh_from_db()
         assert post.matched_keyword_id is None  # 이력 행 생존 + 참조만 해제
     finally:
+        await post.delete()
+        await Source.filter(id=src["id"]).delete()
+
+
+async def test_delete_source_with_scoped_keyword_409(admin_session):
+    # 소스 삭제가 스코프된 키워드를 조용히 연쇄 삭제하지 않는다 (RESTRICT → 409)
+    client, csrf = admin_session
+    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    kw = (
+        await client.post(
+            "/api/keywords", json={"pattern": "키워드", "source_scope": src["id"]}, headers=csrf
+        )
+    ).json()
+    assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+    assert (await client.delete(f"/api/keywords/{kw['id']}", headers=csrf)).status_code == 204
+    assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 204
+
+
+async def test_reply_action_fk_protections(admin_session):
+    """감사 이력 FK: template/sns_account 삭제 → SET NULL 보존, matched_post·reviewer → RESTRICT."""
+    client, csrf = admin_session
+    me = (await client.get("/api/auth/me")).json()
+    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    tpl = (await client.post("/api/templates", json={"name": "t", "body": "b"}, headers=csrf)).json()
+    account = await SnsAccount.create(
+        user_id=me["id"], platform=Platform.threads, display_name="감사테스트"
+    )
+    post = await MatchedPost.create(
+        source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}", content="본문"
+    )
+    log = await ReplyActionLog.create(
+        matched_post=post, reviewer_id=me["id"], template_id=tpl["id"],
+        sns_account=account, final_body="답변", action=ReplyAction.approved,
+    )
+    try:
+        # 참조 대상 삭제 → 이력 행은 생존하고 참조만 해제 (SET NULL)
+        assert (await client.delete(f"/api/templates/{tpl['id']}", headers=csrf)).status_code == 204
+        assert (
+            await client.delete(f"/api/sns-accounts/{account.id}", headers=csrf)
+        ).status_code == 204
+        await log.refresh_from_db()
+        assert log.template_id is None and log.sns_account_id is None
+
+        # 이력이 딸린 부모는 하드삭제 불가 (RESTRICT)
+        with pytest.raises(IntegrityError):
+            await post.delete()
+        with pytest.raises(IntegrityError):
+            await User.filter(id=me["id"]).delete()
+    finally:
+        await log.delete()
         await post.delete()
         await Source.filter(id=src["id"]).delete()
 

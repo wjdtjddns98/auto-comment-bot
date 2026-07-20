@@ -53,7 +53,8 @@ def _validate_pattern(match_type: MatchType, pattern: str) -> None:
     try:
         re.compile(pattern)
     except re.error as exc:
-        raise HTTPException(status_code=422, detail=f"regex 컴파일 실패: {exc}") from exc
+        # exc.msg 만 사용 — str(exc)는 패턴 원문을 포함할 수 있다(검증 에러 no-echo 원칙).
+        raise HTTPException(status_code=422, detail=f"regex 컴파일 실패: {exc.msg}") from exc
 
 
 async def _resolve_scope(source_id: int | None) -> Source | None:

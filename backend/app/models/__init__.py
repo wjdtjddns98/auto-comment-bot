@@ -119,9 +119,10 @@ class Keyword(Model):
     pattern = fields.CharField(max_length=512)
     match_type = fields.CharEnumField(MatchType, max_length=16, default=MatchType.substring)
     enabled = fields.BooleanField(default=True)
-    # null = 전체 소스 대상
+    # null = 전체 소스 대상. RESTRICT: 스코프된 키워드가 있는 소스는 삭제 불가
+    # (소스 삭제가 키워드를 조용히 연쇄 삭제하지 않게).
     source_scope = fields.ForeignKeyField(
-        "models.Source", related_name="keywords", null=True
+        "models.Source", related_name="keywords", null=True, on_delete=fields.RESTRICT
     )
     created_at = fields.DatetimeField(auto_now_add=True)
 
@@ -175,7 +176,11 @@ class ReplyActionLog(Model):
     matched_post = fields.ForeignKeyField(
         "models.MatchedPost", related_name="reply_actions", on_delete=fields.RESTRICT
     )
-    reviewer = fields.ForeignKeyField("models.User", related_name="reply_actions")
+    # RESTRICT: 감사 행위자(user) 삭제로 이력이 증발하지 않게. 감사 이력이 있는 사용자는
+    # 하드삭제 불가 — 향후 사용자 관리는 비활성화/소프트삭제 정책으로 간다.
+    reviewer = fields.ForeignKeyField(
+        "models.User", related_name="reply_actions", on_delete=fields.RESTRICT
+    )
     template = fields.ForeignKeyField(
         "models.ReplyTemplate", related_name="reply_actions", null=True,
         on_delete=fields.SET_NULL,
