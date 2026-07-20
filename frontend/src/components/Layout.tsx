@@ -2,6 +2,8 @@ import { Link, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getHealth } from "../lib/apiClient";
 import { useAuth } from "../hooks/useAuth";
+import { Badge, type BadgeTone } from "./ui/Badge";
+import { Button } from "./ui/Button";
 
 function HealthBadge() {
   const { data, isError } = useQuery({
@@ -10,46 +12,49 @@ function HealthBadge() {
     staleTime: 30_000,
   });
   const label = isError ? "연결 안 됨" : data?.status ?? "확인 중";
-  const color = isError || data?.status === "degraded" ? "crimson" : data?.status === "ok" ? "seagreen" : "gray";
-  return <span style={{ color, fontSize: 12 }}>● {label}</span>;
+  const tone: BadgeTone =
+    isError || data?.status === "degraded" ? "danger" : data?.status === "ok" ? "success" : "neutral";
+  return <Badge tone={tone}>● {label}</Badge>;
 }
+
+const navLinks = [
+  { to: "/", label: "대시보드" },
+  { to: "/admin/sources", label: "소스" },
+  { to: "/admin/keywords", label: "키워드" },
+  { to: "/admin/templates", label: "템플릿" },
+  { to: "/admin/sns-accounts", label: "SNS 계정" },
+  { to: "/audit-log", label: "감사 로그" },
+];
 
 export function Layout() {
   const { user, logout } = useAuth();
 
   return (
-    <div style={{ fontFamily: "system-ui" }}>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 16,
-          padding: "12px 24px",
-          borderBottom: "1px solid #ddd",
-        }}
-      >
-        <strong>SNS 키워드 모니터</strong>
-        <nav style={{ display: "flex", gap: 12 }}>
-          <Link to="/">대시보드</Link>
-          <Link to="/admin/sources">소스</Link>
-          <Link to="/admin/keywords">키워드</Link>
-          <Link to="/admin/templates">템플릿</Link>
-          <Link to="/admin/sns-accounts">SNS 계정</Link>
-          <Link to="/audit-log">감사 로그</Link>
+    <div className="min-h-screen">
+      <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-6 py-3">
+        <strong className="text-gray-900">SNS 키워드 모니터</strong>
+        <nav className="flex gap-3 text-sm text-gray-600">
+          {navLinks.map((link) => (
+            <Link key={link.to} to={link.to} className="hover:text-brand-600">
+              {link.label}
+            </Link>
+          ))}
         </nav>
-        <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
+        <div className="ml-auto flex items-center gap-3">
           <HealthBadge />
           {user && (
             <>
-              <span>
+              <span className="text-sm text-gray-600">
                 {user.email} ({user.role})
               </span>
-              <button onClick={() => logout()}>로그아웃</button>
+              <Button variant="secondary" size="sm" onClick={() => logout()}>
+                로그아웃
+              </Button>
             </>
           )}
         </div>
       </header>
-      <main style={{ padding: 24 }}>
+      <main className="p-6">
         <Outlet />
       </main>
     </div>

@@ -1,6 +1,8 @@
 import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../hooks/useAuth";
+import { Button } from "../components/ui/Button";
+import { Field, Input } from "../components/ui/Input";
 
 export default function LoginPage() {
   const { user, login, isLoggingIn, loginError } = useAuth();
@@ -25,33 +27,31 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ maxWidth: 320, margin: "80px auto", fontFamily: "system-ui" }}>
-      <h1>로그인</h1>
-      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-        <label>
-          이메일
-          <input
+    <div className="mx-auto mt-20 max-w-sm">
+      <h1 className="mb-4 text-xl font-semibold text-gray-900">로그인</h1>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3">
+        <Field label="이메일" htmlFor="login-email">
+          <Input
+            id="login-email"
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
-            style={{ display: "block", width: "100%" }}
           />
-        </label>
-        <label>
-          비밀번호
-          <input
+        </Field>
+        <Field label="비밀번호" htmlFor="login-password">
+          <Input
+            id="login-password"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             required
-            style={{ display: "block", width: "100%" }}
           />
-        </label>
-        {loginError && <p style={{ color: "crimson" }}>{loginError}</p>}
-        <button type="submit" disabled={isLoggingIn}>
+        </Field>
+        {loginError && <p className="text-sm text-tone-danger">{loginError}</p>}
+        <Button type="submit" disabled={isLoggingIn}>
           {isLoggingIn ? "로그인 중…" : "로그인"}
-        </button>
+        </Button>
       </form>
     </div>
   );
