@@ -58,7 +58,7 @@ function CreateKeywordForm() {
       <h2 className="text-sm font-semibold text-gray-900">키워드 추가</h2>
       <div className="flex flex-wrap gap-4">
         <Field label="패턴">
-          <Input value={pattern} onChange={(e) => setPattern(e.target.value)} placeholder="예: 이사 업체" />
+          <Input value={pattern} onChange={(e) => setPattern(e.target.value)} placeholder="예: 강아지 간식" />
         </Field>
         <Field label="매칭 방식">
           <Select value={matchType} onChange={(e) => setMatchType(e.target.value as MatchType)}>
