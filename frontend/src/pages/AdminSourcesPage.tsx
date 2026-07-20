@@ -2,27 +2,34 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createSource, deleteSource, getSources, patchSource } from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
-import { SOURCE_TYPE_LABEL, formatDateTime, HEALTH_TONE } from "../lib/matchDisplay";
+import {
+  SOURCE_TYPE_IMPLEMENTED,
+  SOURCE_TYPE_LABEL,
+  formatDateTime,
+  getRssUrl,
+  HEALTH_TONE,
+} from "../lib/matchDisplay";
 import type { Source, SourceType } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
-import { Field, Input, Select, Textarea } from "../components/ui/Input";
+import { Field, Input, Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 
 const SOURCE_TYPES: SourceType[] = ["threads", "naver_cafe", "community"];
 
 function CreateSourceForm() {
   const queryClient = useQueryClient();
-  const [type, setType] = useState<SourceType>("threads");
-  const [config, setConfig] = useState("{}");
+  const [type, setType] = useState<SourceType>("community");
+  const [rssUrl, setRssUrl] = useState("");
   const [pollIntervalSec, setPollIntervalSec] = useState(300);
   const [error, setError] = useState<string | null>(null);
+  const implemented = SOURCE_TYPE_IMPLEMENTED[type];
 
   const mutation = useMutation({
     mutationFn: createSource,
     onSuccess: () => {
-      setConfig("{}");
+      setRssUrl("");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["sources"] });
     },
@@ -30,14 +37,12 @@ function CreateSourceForm() {
   });
 
   function handleSubmit() {
-    let parsedConfig: Record<string, unknown>;
-    try {
-      parsedConfig = JSON.parse(config);
-    } catch {
-      setError("설정(config)은 올바른 JSON이어야 합니다.");
+    if (!implemented) return;
+    if (!rssUrl.trim()) {
+      setError("RSS URL을 입력하세요.");
       return;
     }
-    mutation.mutate({ type, config: parsedConfig, poll_interval_sec: pollIntervalSec });
+    mutation.mutate({ type, config: { rss_url: rssUrl.trim() }, poll_interval_sec: pollIntervalSec });
   }
 
   return (
@@ -47,8 +52,9 @@ function CreateSourceForm() {
         <Field label="타입">
           <Select value={type} onChange={(e) => setType(e.target.value as SourceType)}>
             {SOURCE_TYPES.map((t) => (
-              <option key={t} value={t}>
+              <option key={t} value={t} disabled={!SOURCE_TYPE_IMPLEMENTED[t]}>
                 {SOURCE_TYPE_LABEL[t]}
+                {SOURCE_TYPE_IMPLEMENTED[t] ? "" : " (미구현 · M2 예정)"}
               </option>
             ))}
           </Select>
@@ -62,11 +68,22 @@ function CreateSourceForm() {
           />
         </Field>
       </div>
-      <Field label="설정 (JSON)">
-        <Textarea rows={3} value={config} onChange={(e) => setConfig(e.target.value)} />
-      </Field>
+      {implemented ? (
+        <Field label="RSS URL">
+          <Input
+            type="url"
+            placeholder="https://example.com/feed"
+            value={rssUrl}
+            onChange={(e) => setRssUrl(e.target.value)}
+          />
+        </Field>
+      ) : (
+        <p className="text-sm text-gray-500">
+          이 소스 타입은 아직 지원되지 않습니다(M2 예정). "커뮤니티" 타입만 등록할 수 있습니다.
+        </p>
+      )}
       {error && <p className="text-sm text-tone-danger">{error}</p>}
-      <Button onClick={handleSubmit} disabled={mutation.isPending} className="self-start">
+      <Button onClick={handleSubmit} disabled={mutation.isPending || !implemented} className="self-start">
         {mutation.isPending ? "추가 중…" : "추가"}
       </Button>
     </Card>
@@ -77,8 +94,9 @@ function SourceRow({ source }: { source: Source }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [pollIntervalSec, setPollIntervalSec] = useState(source.poll_interval_sec);
-  const [config, setConfig] = useState(JSON.stringify(source.config));
+  const [rssUrl, setRssUrl] = useState(() => getRssUrl(source.config));
   const [error, setError] = useState<string | null>(null);
+  const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ["sources"] });
@@ -101,17 +119,15 @@ function SourceRow({ source }: { source: Source }) {
   });
 
   function handleSave() {
-    let parsedConfig: Record<string, unknown>;
-    try {
-      parsedConfig = JSON.parse(config);
-    } catch {
-      setError("설정(config)은 올바른 JSON이어야 합니다.");
-      return;
+    const body: Parameters<typeof patchSource>[1] = { poll_interval_sec: pollIntervalSec };
+    if (implemented) {
+      if (!rssUrl.trim()) {
+        setError("RSS URL을 입력하세요.");
+        return;
+      }
+      body.config = { rss_url: rssUrl.trim() };
     }
-    patchMutation.mutate(
-      { poll_interval_sec: pollIntervalSec, config: parsedConfig },
-      { onSuccess: () => setEditing(false) }
-    );
+    patchMutation.mutate(body, { onSuccess: () => setEditing(false) });
   }
 
   return (
@@ -119,10 +135,17 @@ function SourceRow({ source }: { source: Source }) {
       <Tr className="hover:bg-gray-50 align-top">
         <Td>{SOURCE_TYPE_LABEL[source.type] ?? source.type}</Td>
         <Td className="max-w-xs">
-          {editing ? (
-            <Textarea rows={2} value={config} onChange={(e) => setConfig(e.target.value)} />
+          {editing && implemented ? (
+            <Input
+              type="url"
+              value={rssUrl}
+              onChange={(e) => setRssUrl(e.target.value)}
+              className="w-full"
+            />
+          ) : implemented ? (
+            <span className="break-all text-xs text-gray-500">{getRssUrl(source.config)}</span>
           ) : (
-            <span className="break-all text-xs text-gray-500">{JSON.stringify(source.config)}</span>
+            <span className="break-all text-xs text-gray-400">{JSON.stringify(source.config)}</span>
           )}
         </Td>
         <Td>

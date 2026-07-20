@@ -44,7 +44,7 @@ export const MOCK_SOURCES: Source[] = [
   {
     id: 3,
     type: "community",
-    config: { board_url: "https://example-petcommunity.com/board" },
+    config: { rss_url: "https://example-petcommunity.com/board/feed.rss" },
     poll_interval_sec: 900,
     enabled: false,
     last_success_at: null,

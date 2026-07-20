@@ -23,6 +23,18 @@ export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
   community: "커뮤니티",
 };
 
+// 어댑터 구현 여부 — community(RSS)만 M1 범위, 나머지는 M2 예정(backend/app/sources/__init__.py 참고).
+export const SOURCE_TYPE_IMPLEMENTED: Record<SourceType, boolean> = {
+  threads: false,
+  naver_cafe: false,
+  community: true,
+};
+
+export function getRssUrl(config: Record<string, unknown>): string {
+  const value = config.rss_url;
+  return typeof value === "string" ? value : "";
+}
+
 export const HEALTH_TONE: Record<string, BadgeTone> = {
   ok: "success",
   degraded: "warning",
