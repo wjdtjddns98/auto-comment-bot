@@ -13,6 +13,7 @@ from app import reply
 from app import sources as sources_registry
 from app.auth import hash_password
 from app.models import (
+    AccountStatus,
     MatchedPost,
     Platform,
     PostStatus,
@@ -140,6 +141,32 @@ async def test_approve_validation_does_not_touch_status(reviewer_session):
             json={"final_body": "본문", "sns_account_id": other_account.id}, headers=csrf,
         )
         assert r.status_code == 422
+        # 만료/회수된 본인 계정 → 422
+        revoked = await SnsAccount.create(
+            user=user, platform=Platform.community, display_name="회수됨",
+            status=AccountStatus.revoked,
+        )
+        r = await client.post(
+            f"/api/matches/{match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": revoked.id}, headers=csrf,
+        )
+        assert r.status_code == 422
+        await revoked.delete()
+        # 소스 타입(community)과 계정 플랫폼(threads) 불일치 → 422
+        mismatched = await SnsAccount.create(
+            user=user, platform=Platform.threads, display_name="플랫폼불일치"
+        )
+        r = await client.post(
+            f"/api/matches/{match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": mismatched.id}, headers=csrf,
+        )
+        assert r.status_code == 422
+        await mismatched.delete()
+        # 본문 상한(2000자) 초과 → 422
+        r = await client.post(
+            f"/api/matches/{match.id}/approve", json={"final_body": "a" * 2001}, headers=csrf
+        )
+        assert r.status_code == 422
         # CSRF 없이 → 403
         r = await client.post(f"/api/matches/{match.id}/approve", json={"final_body": "본문"})
         assert r.status_code == 403
@@ -161,6 +188,10 @@ async def test_ignore_transitions(reviewer_session):
         assert r.status_code == 200 and r.json() == {"status": "ignored"}
         await match.refresh_from_db()
         assert match.status == PostStatus.ignored
+        # 무시도 감사 이력에 남는다 (canceled)
+        logs = await ReplyActionLog.filter(matched_post_id=match.id)
+        assert len(logs) == 1 and logs[0].action == ReplyAction.canceled
+        assert logs[0].reviewer_id == user.id
         # 무시된 매칭은 approve 불가(CAS 0행)
         r = await client.post(
             f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
@@ -275,6 +306,60 @@ async def test_sweep_recovers_stuck_sending(reviewer_session):
     finally:
         await _cleanup(stuck)
         await _cleanup(fresh)
+
+
+async def test_send_timeout_forces_failed(reviewer_session, monkeypatch):
+    """send_reply 가 상한을 넘기면 강제 취소 → failed 회계 + reviewing 복귀 (1차 리뷰 C2)."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter(delay=5.0)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    monkeypatch.setattr(reply, "SEND_TIMEOUT_SEC", 0.1)
+    match = await _make_match(user, SourceType.threads)
+    try:
+        r = await client.post(
+            f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
+        )
+        assert r.status_code == 502
+        await match.refresh_from_db()
+        assert match.status == PostStatus.reviewing
+        failed = await ReplyActionLog.filter(matched_post_id=match.id, action=ReplyAction.failed)
+        assert len(failed) == 1 and "타임아웃" in failed[0].error
+    finally:
+        await _cleanup(match)
+
+
+async def test_zombie_approve_does_not_override_ignore(reviewer_session, monkeypatch):
+    """펜싱(1차 리뷰 C1): sweep 회수 후 사람이 ignore 한 매칭을, 뒤늦게 완료된 원래
+    approve 요청이 replied 로 덮어쓰지 못한다. 전송 사실 자체는 sent 로 audit 에 남는다."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter(delay=0.5)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    match = await _make_match(user, SourceType.threads)
+    try:
+        approve_task = asyncio.create_task(
+            client.post(
+                f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
+            )
+        )
+        await asyncio.sleep(0.2)  # 클레임(sending) 이후, 전송 완료 전
+        # sweep 의 고착 회수를 재현(상태만 reviewing 으로 — claimed_at 은 그대로)
+        assert await MatchedPost.filter(id=match.id, status=PostStatus.sending).update(
+            status=PostStatus.reviewing
+        ) == 1
+        # 사람이 명시적으로 무시
+        r = await client.post(f"/api/matches/{match.id}/ignore", headers=csrf)
+        assert r.status_code == 200
+
+        r = await approve_task
+        assert r.status_code == 200 and r.json()["action"] == "sent"
+        await match.refresh_from_db()
+        assert match.status == PostStatus.ignored  # 사람의 결정이 이긴다
+        actions = {
+            a.action for a in await ReplyActionLog.filter(matched_post_id=match.id)
+        }
+        assert actions == {ReplyAction.canceled, ReplyAction.sent}  # 전송 사실은 기록 유지
+    finally:
+        await _cleanup(match)
 
 
 def test_uvicorn_single_worker_config():

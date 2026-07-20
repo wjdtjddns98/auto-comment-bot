@@ -30,7 +30,11 @@ class FetchError(Exception):
 
 
 class SendError(Exception):
-    """답변 전송 실패 — approve 플로우가 failed 회계 + reviewing 복귀 후 502 로 변환한다."""
+    """답변 전송 실패 — approve 플로우가 failed 회계 + reviewing 복귀 후 502 로 변환한다.
+
+    계약: 메시지는 audit 테이블에 저장되고 GET /api/matches/{id} 응답으로 노출된다 —
+    자격증명·요청 헤더·토큰을 절대 포함하지 말 것(불변식 ③). SendError 이외의 예외
+    원문은 API 계층이 응답/DB 로 내보내지 않는다."""
 
 
 @dataclass(frozen=True)

@@ -46,7 +46,7 @@ def _out(a: SnsAccount) -> SnsAccountOut:
     )
 
 
-def _scope(user: User):
+def visible_accounts(user: User):
     """본인 것만. admin 은 전체(운영 파악·정리용)."""
     q = SnsAccount.all()
     return q if user.role == Role.admin else q.filter(user_id=user.id)
@@ -54,7 +54,7 @@ def _scope(user: User):
 
 @router.get("")
 async def list_accounts(user: Annotated[User, Depends(current_user)]) -> list[SnsAccountOut]:
-    return [_out(a) for a in await _scope(user).order_by("id")]
+    return [_out(a) for a in await visible_accounts(user).order_by("id")]
 
 
 @router.post("", status_code=201, dependencies=[Depends(require_csrf)])
@@ -84,5 +84,5 @@ async def delete_account(
     account_id: int, user: Annotated[User, Depends(current_user)]
 ) -> None:
     # secret 은 FK cascade 로 함께 삭제된다. 타인 계정은 존재 여부도 노출하지 않는다(404).
-    if not await _scope(user).filter(id=account_id).delete():
+    if not await visible_accounts(user).filter(id=account_id).delete():
         raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")

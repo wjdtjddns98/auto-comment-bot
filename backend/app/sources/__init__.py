@@ -4,6 +4,7 @@ from app.sources.base import (  # noqa: F401 - 편의 re-export
     FetchedPost,
     FetchError,
     RateLimitedError,
+    SendError,
     SourceAdapter,
 )
 from app.sources.rss import RssAdapter
