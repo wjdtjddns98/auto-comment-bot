@@ -19,22 +19,23 @@ function HealthBadge() {
 
 const navLinks = [
   { to: "/", label: "대시보드" },
-  { to: "/admin/sources", label: "소스" },
-  { to: "/admin/keywords", label: "키워드" },
-  { to: "/admin/templates", label: "템플릿" },
-  { to: "/admin/sns-accounts", label: "SNS 계정" },
+  { to: "/admin/sources", label: "소스", adminOnly: true },
+  { to: "/admin/keywords", label: "키워드", adminOnly: true },
+  { to: "/admin/templates", label: "템플릿", adminOnly: true },
+  { to: "/admin/sns-accounts", label: "SNS 계정", adminOnly: true },
   { to: "/audit-log", label: "감사 로그" },
 ];
 
 export function Layout() {
   const { user, logout } = useAuth();
+  const visibleLinks = navLinks.filter((link) => !link.adminOnly || user?.role === "admin");
 
   return (
     <div className="min-h-screen">
       <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-6 py-3">
         <strong className="text-gray-900">SNS 키워드 모니터</strong>
         <nav className="flex gap-3 text-sm text-gray-600">
-          {navLinks.map((link) => (
+          {visibleLinks.map((link) => (
             <Link key={link.to} to={link.to} className="hover:text-brand-600">
               {link.label}
             </Link>
