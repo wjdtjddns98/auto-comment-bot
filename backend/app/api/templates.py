@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.api.deps import require_admin, require_csrf
+from app.api.schemas import PatchModel
 from app.models import ReplyTemplate, User
 
 router = APIRouter(
@@ -26,7 +27,7 @@ class TemplateIn(BaseModel):
     body: str = Field(min_length=1)
 
 
-class TemplatePatch(BaseModel):
+class TemplatePatch(PatchModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
     body: str | None = Field(default=None, min_length=1)
     enabled: bool | None = None

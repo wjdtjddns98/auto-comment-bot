@@ -54,9 +54,13 @@ async def create_account(
 ) -> SnsAccountOut:
     try:
         ciphertext = crypto.encrypt_credentials(body.credentials)
-    except RuntimeError as exc:
-        # CREDENTIALS_FERNET_KEYS 미설정 — 자격증명을 평문으로 받아둘 수는 없다.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (RuntimeError, ValueError) as exc:
+        # 키 미설정(RuntimeError)/오형식(ValueError) — 자격증명을 평문으로 받아둘 수는 없다.
+        # 예외 문자열은 응답에 싣지 않는다(고정 메시지).
+        raise HTTPException(
+            status_code=503,
+            detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
+        ) from exc
     async with in_transaction():
         account = await SnsAccount.create(
             user=admin, platform=body.platform, display_name=body.display_name

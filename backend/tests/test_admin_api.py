@@ -7,7 +7,7 @@ from cryptography.fernet import Fernet
 from app import crypto
 from app.auth import hash_password
 from app.config import settings
-from app.models import Role, SnsAccount, SnsAccountSecret, User
+from app.models import MatchedPost, Role, SnsAccount, SnsAccountSecret, Source, User
 
 pytestmark = pytest.mark.db
 
@@ -83,6 +83,41 @@ async def test_keyword_regex_validation_and_scope(admin_session):
     assert (await client.delete(f"/api/keywords/{kid}", headers=csrf)).status_code == 204
 
 
+async def test_patch_explicit_null_422(admin_session):
+    # 명시적 null 은 ORM 500 이 아니라 422 로 거부 (생략=변경 없음과 구분)
+    client, csrf = admin_session
+    r = await client.post("/api/keywords", json={"pattern": "키워드"}, headers=csrf)
+    kid = r.json()["id"]
+    assert (
+        await client.patch(f"/api/keywords/{kid}", json={"pattern": None}, headers=csrf)
+    ).status_code == 422
+    # source_scope 는 null 이 유효값(스코프 해제)
+    r = await client.patch(f"/api/keywords/{kid}", json={"source_scope": None}, headers=csrf)
+    assert r.status_code == 200 and r.json()["source_scope"] is None
+    await client.delete(f"/api/keywords/{kid}", headers=csrf)
+
+
+async def test_delete_preserves_match_history(admin_session):
+    """감사 보호: 소스 삭제는 이력 있으면 409(RESTRICT), 키워드 삭제는 이력 보존(SET NULL)."""
+    client, csrf = admin_session
+    src = (await client.post("/api/sources", json={"type": "community"}, headers=csrf)).json()
+    kw = (await client.post("/api/keywords", json={"pattern": "키워드"}, headers=csrf)).json()
+    post = await MatchedPost.create(
+        source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}",
+        content="본문", matched_keyword_id=kw["id"],
+    )
+    try:
+        r = await client.delete(f"/api/sources/{src['id']}", headers=csrf)
+        assert r.status_code == 409
+
+        assert (await client.delete(f"/api/keywords/{kw['id']}", headers=csrf)).status_code == 204
+        await post.refresh_from_db()
+        assert post.matched_keyword_id is None  # 이력 행 생존 + 참조만 해제
+    finally:
+        await post.delete()
+        await Source.filter(id=src["id"]).delete()
+
+
 async def test_templates_crud_roundtrip(admin_session):
     client, csrf = admin_session
     r = await client.post("/api/templates", json={"name": "기본", "body": "안녕하세요"}, headers=csrf)
@@ -117,12 +152,25 @@ async def test_sns_account_secret_never_in_responses(admin_session, monkeypatch)
     assert r.status_code == 200
     assert secret_token not in r.text
     assert "encrypted_credentials" not in r.text
+    # allowlist: 응답 필드 집합 자체를 고정 — 새 필드가 몰래 실리는 것도 차단
+    item = next(a for a in r.json() if a["id"] == account_id)
+    assert set(item) == {"id", "platform", "display_name", "status", "token_expires_at"}
 
-    # 저장은 암호화본으로만 — 평문 substring 부재 + 복호 왕복 일치
+    # 저장은 암호화본으로만 — 평문 substring 부재 + 복호 왕복 일치, 암호문도 응답에 없음
     secret = await SnsAccountSecret.get(account_id=account_id)
     raw = bytes(secret.encrypted_credentials)
     assert secret_token.encode() not in raw
     assert crypto.decrypt_credentials(raw) == {"access_token": secret_token}
+    assert raw.decode() not in r.text
+
+    # 422 검증 에러도 입력 원문(자격증명)을 echo 하지 않는다 (불변식 ③)
+    leaked = f"LEAK-{uuid.uuid4().hex}"
+    r = await client.post(
+        "/api/sns-accounts",
+        json={"platform": "threads", "display_name": "x", "credentials": leaked},
+        headers=csrf,
+    )
+    assert r.status_code == 422 and leaked not in r.text
 
     # 삭제 시 secret cascade
     assert (await client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)).status_code == 204
@@ -141,16 +189,21 @@ async def test_sns_account_without_key_503(admin_session, monkeypatch):
     assert r.status_code == 503
 
 
+ADMIN_PREFIXES = ["/api/sources", "/api/keywords", "/api/templates", "/api/sns-accounts"]
+
+
 async def test_admin_routes_require_admin_and_csrf(api_client):
-    # 미인증 → 401
-    assert (await api_client.get("/api/sources")).status_code == 401
-    # reviewer → 403
+    # 미인증 → 401 (4개 라우터 전부)
+    for prefix in ADMIN_PREFIXES:
+        assert (await api_client.get(prefix)).status_code == 401
+    # reviewer → 403 (4개 라우터 전부)
     user = await _make_user(Role.reviewer)
     try:
         await api_client.post(
             "/api/auth/login", json={"email": user.email, "password": PASSWORD}
         )
-        assert (await api_client.get("/api/sources")).status_code == 403
+        for prefix in ADMIN_PREFIXES:
+            assert (await api_client.get(prefix)).status_code == 403
     finally:
         await user.delete()
 

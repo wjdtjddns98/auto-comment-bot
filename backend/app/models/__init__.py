@@ -131,14 +131,18 @@ class Keyword(Model):
 
 class MatchedPost(Model):
     id = fields.IntField(primary_key=True)
-    source = fields.ForeignKeyField("models.Source", related_name="matched_posts")
+    # RESTRICT: 매칭 이력이 있는 소스는 삭제 불가(감사 보호) — 비활성화(enabled=False)가 정식 경로.
+    source = fields.ForeignKeyField(
+        "models.Source", related_name="matched_posts", on_delete=fields.RESTRICT
+    )
     external_post_id = fields.CharField(max_length=512)  # 안정적 ID (FR-3)
     author = fields.CharField(max_length=255, null=True)
     url = fields.CharField(max_length=1024, null=True)
     content = fields.TextField()
     content_hash = fields.CharField(max_length=64, null=True)  # 편집 재매칭용
+    # SET_NULL: 키워드가 지워져도 매칭 이력은 남는다.
     matched_keyword = fields.ForeignKeyField(
-        "models.Keyword", related_name="matched_posts", null=True
+        "models.Keyword", related_name="matched_posts", null=True, on_delete=fields.SET_NULL
     )
     published_at = fields.DatetimeField(null=True)  # canonical 게시시각
     matched_at = fields.DatetimeField(auto_now_add=True)
@@ -167,15 +171,20 @@ class ReplyActionLog(Model):
     # append-only 감사 로그. matched_post당 action='sent' 최대 1건을
     # partial unique index로 강제 (별도 마이그레이션, MUST-FIX #1).
     id = fields.IntField(primary_key=True)
-    matched_post = fields.ForeignKeyField("models.MatchedPost", related_name="reply_actions")
+    # append-only 감사 보호: 부모 삭제로 이력이 증발하지 않게 RESTRICT/SET_NULL.
+    matched_post = fields.ForeignKeyField(
+        "models.MatchedPost", related_name="reply_actions", on_delete=fields.RESTRICT
+    )
     reviewer = fields.ForeignKeyField("models.User", related_name="reply_actions")
     template = fields.ForeignKeyField(
-        "models.ReplyTemplate", related_name="reply_actions", null=True
+        "models.ReplyTemplate", related_name="reply_actions", null=True,
+        on_delete=fields.SET_NULL,
     )
     final_body = fields.TextField()
     action = fields.CharEnumField(ReplyAction, max_length=16)
     sns_account = fields.ForeignKeyField(
-        "models.SnsAccount", related_name="reply_actions", null=True
+        "models.SnsAccount", related_name="reply_actions", null=True,
+        on_delete=fields.SET_NULL,
     )
     external_reply_id = fields.CharField(max_length=512, null=True)
     idempotency_key = fields.CharField(max_length=128, null=True)

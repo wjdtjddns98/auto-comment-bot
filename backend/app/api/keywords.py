@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.api.deps import require_admin, require_csrf
+from app.api.schemas import PatchModel
 from app.models import Keyword, MatchType, Source, User
 
 router = APIRouter(
@@ -30,7 +31,9 @@ class KeywordIn(BaseModel):
     source_scope: int | None = None
 
 
-class KeywordPatch(BaseModel):
+class KeywordPatch(PatchModel):
+    nullable_fields = frozenset({"source_scope"})  # null = 전체 소스로 스코프 해제
+
     pattern: str | None = Field(default=None, min_length=1, max_length=512)
     match_type: MatchType | None = None
     enabled: bool | None = None

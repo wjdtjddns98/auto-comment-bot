@@ -4,8 +4,10 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
+from tortoise.exceptions import IntegrityError
 
 from app.api.deps import require_admin, require_csrf
+from app.api.schemas import PatchModel
 from app.models import HealthStatus, Source, SourceType, User
 
 router = APIRouter(
@@ -33,7 +35,7 @@ class SourceIn(BaseModel):
     poll_interval_sec: int = Field(default=300, ge=60)
 
 
-class SourcePatch(BaseModel):
+class SourcePatch(PatchModel):
     enabled: bool | None = None
     poll_interval_sec: int | None = Field(default=None, ge=60)
     config: dict[str, Any] | None = None
@@ -68,5 +70,13 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
 
 @router.delete("/{source_id}", status_code=204, dependencies=[Depends(require_csrf)])
 async def delete_source(source_id: int) -> None:
-    if not await Source.filter(id=source_id).delete():
+    try:
+        deleted = await Source.filter(id=source_id).delete()
+    except IntegrityError as exc:
+        # matched_posts.source RESTRICT — 이력이 있는 소스는 삭제 불가(감사 보호).
+        raise HTTPException(
+            status_code=409,
+            detail="매칭 이력이 있는 소스는 삭제할 수 없습니다 — enabled=false 로 비활성화하세요",
+        ) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="소스가 없습니다")
