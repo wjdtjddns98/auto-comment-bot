@@ -338,19 +338,22 @@ function handleDeleteTemplate(id: number): void {
   templates.splice(idx, 1);
 }
 
-// ---- SNS 계정 (admin) — 토큰 배제 ----
+// ---- SNS 계정 (로그인 사용자 — 본인 귀속 셀프서비스) — 토큰 배제 ----
 
 function handleGetSnsAccounts(): SnsAccount[] {
-  requireUser();
-  return [...snsAccounts];
+  const user = requireUser();
+  if (user.role === "admin") return [...snsAccounts];
+  return snsAccounts.filter((a) => a.user_id === user.id);
 }
 
 function handleCreateSnsAccount(body: unknown): SnsAccount {
-  requireUser();
+  const user = requireUser();
   const req = (body ?? {}) as Pick<SnsAccount, "platform" | "display_name">;
   // credentials 는 실제로는 서버가 즉시 암호화해 별도 테이블에 저장 — 모의 서버는 아예 보관하지 않는다.
+  // 생성 주체에게 자동 귀속(타인 명의 등록 불가) — 소유자 지정 입력 자체가 없다.
   const record: SnsAccount = {
     id: nextId(snsAccounts),
+    user_id: user.id,
     platform: req.platform,
     display_name: req.display_name,
     status: "active",
@@ -361,9 +364,12 @@ function handleCreateSnsAccount(body: unknown): SnsAccount {
 }
 
 function handleDeleteSnsAccount(id: number): void {
-  requireUser();
+  const user = requireUser();
   const idx = snsAccounts.findIndex((a) => a.id === id);
-  if (idx === -1) throw new MockApiError(404, "SNS 계정을 찾을 수 없습니다.");
+  // 본인 것만 삭제 가능(admin 은 전체) · 타인 것은 존재 여부 비노출로 404.
+  if (idx === -1 || (user.role !== "admin" && snsAccounts[idx].user_id !== user.id)) {
+    throw new MockApiError(404, "SNS 계정을 찾을 수 없습니다.");
+  }
   snsAccounts.splice(idx, 1);
 }
 
