@@ -28,6 +28,7 @@ const REPLY_ACTION_LABEL: Record<string, string> = {
   approved: "승인(수동 복사)",
   sent: "전송 성공",
   failed: "전송 실패",
+  canceled: "무시(취소)",
 };
 
 function describeError(error: unknown): string {
@@ -97,7 +98,12 @@ export default function MatchDetailPage() {
   });
 
   const retryMutation = useMutation({
-    mutationFn: () => retryMatch(id),
+    mutationFn: () =>
+      retryMatch(id, {
+        template_id: templateId === "" ? undefined : templateId,
+        final_body: finalBody,
+        sns_account_id: snsAccountId === "" ? undefined : snsAccountId,
+      }),
     onSuccess: (res) => {
       setLastResult(res);
       setActionError(null);
