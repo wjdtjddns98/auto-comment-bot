@@ -23,6 +23,7 @@ import {
   SOURCE_TYPE_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
+  THREADS_BODY_LIMIT,
 } from "../lib/matchDisplay";
 
 const REPLY_ACTION_LABEL: Record<string, string> = {
@@ -68,6 +69,8 @@ export default function MatchDetailPage() {
     [sources, matchQuery.data?.source_id]
   );
   const writable = source ? isWritableSourceType(source.type) : false;
+  const isThreads = source?.type === "threads";
+  const overThreadsLimit = isThreads && finalBody.length > THREADS_BODY_LIMIT;
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ["match", id] });
@@ -195,6 +198,11 @@ export default function MatchDetailPage() {
               onChange={(e) => setFinalBody(e.target.value)}
               placeholder="전송할 답변을 입력하거나 템플릿을 선택하세요."
             />
+            {isThreads && (
+              <p className={`text-xs ${overThreadsLimit ? "text-tone-danger" : "text-gray-400"}`}>
+                {finalBody.length}/{THREADS_BODY_LIMIT}자 (Threads 전송 상한 — 초과 시 전송이 실패합니다)
+              </p>
+            )}
           </Field>
 
           {writable ? (
@@ -225,7 +233,7 @@ export default function MatchDetailPage() {
           <div className="flex items-center gap-2">
             <Button
               onClick={() => approveMutation.mutate()}
-              disabled={!finalBody.trim() || writableAccountMissing || approveMutation.isPending}
+              disabled={!finalBody.trim() || writableAccountMissing || overThreadsLimit || approveMutation.isPending}
             >
               {approveMutation.isPending ? "처리 중…" : "승인"}
             </Button>
@@ -233,7 +241,7 @@ export default function MatchDetailPage() {
               <Button
                 variant="secondary"
                 onClick={() => retryMutation.mutate()}
-                disabled={writableAccountMissing || retryMutation.isPending}
+                disabled={writableAccountMissing || overThreadsLimit || retryMutation.isPending}
               >
                 재시도
               </Button>

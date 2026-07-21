@@ -30,9 +30,9 @@ export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
   community: "커뮤니티",
 };
 
-// 어댑터 구현 여부 — community(RSS)만 M1 범위, 나머지는 M2 예정(backend/app/sources/__init__.py 참고).
+// 어댑터 구현 여부 — community(RSS)·threads(키워드 검색) 등록 가능, naver_cafe 는 여전히 미구현(등록 422).
 export const SOURCE_TYPE_IMPLEMENTED: Record<SourceType, boolean> = {
-  threads: false,
+  threads: true,
   naver_cafe: false,
   community: true,
 };
@@ -41,6 +41,19 @@ export function getRssUrl(config: Record<string, unknown>): string {
   const value = config.rss_url;
   return typeof value === "string" ? value : "";
 }
+
+export function getThreadsQuery(config: Record<string, unknown>): string {
+  const value = config.query;
+  return typeof value === "string" ? value : "";
+}
+
+export function getThreadsAccountId(config: Record<string, unknown>): number | "" {
+  const value = config.sns_account_id;
+  return typeof value === "number" ? value : "";
+}
+
+// Threads 플랫폼 실 상한(API 의 final_body 상한은 2000자지만 전송 시 500자 초과는 502 확정 실패) — 이슈 #30.
+export const THREADS_BODY_LIMIT = 500;
 
 export const HEALTH_TONE: Record<string, BadgeTone> = {
   ok: "success",
