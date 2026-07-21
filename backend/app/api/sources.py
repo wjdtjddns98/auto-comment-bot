@@ -21,6 +21,7 @@ class SourceOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    name: str | None
     type: SourceType
     config: dict[str, Any]
     poll_interval_sec: int
@@ -30,7 +31,17 @@ class SourceOut(BaseModel):
     backoff_until: datetime | None
 
 
+def _clean_name(v: str | None) -> str | None:
+    """공백뿐인 이름은 미설정(None)으로 — FE 폴백(config 값 표시)이 동작하게."""
+    if v is None:
+        return None
+    v = v.strip()
+    return v or None
+
+
 class SourceIn(BaseModel):
+    # 표시용 이름(예: 커뮤니티 이름) — 선택. 없으면 FE 가 config 값(URL 등)으로 폴백.
+    name: str | None = Field(default=None, max_length=100)
     type: SourceType
     config: dict[str, Any] = {}
     # 하한 60초: 예의 있는 수집(불변식 ④) — 소스에 초 단위 폴링을 걸 수 없게 한다.
@@ -38,6 +49,10 @@ class SourceIn(BaseModel):
 
 
 class SourcePatch(PatchModel):
+    # name 은 명시적 null = "이름 제거"(config 폴백 표시로 복귀)가 유효한 값이다.
+    nullable_fields = frozenset({"name"})
+
+    name: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
     poll_interval_sec: int | None = Field(default=None, ge=60)
     config: dict[str, Any] | None = None
@@ -75,7 +90,8 @@ async def create_source(
     body: SourceIn, admin: Annotated[User, Depends(require_admin)]
 ) -> SourceOut:
     s = await Source.create(
-        user=admin, type=body.type, config=_validate_config(body.type, body.config),
+        user=admin, name=_clean_name(body.name), type=body.type,
+        config=_validate_config(body.type, body.config),
         poll_interval_sec=body.poll_interval_sec,
     )
     return SourceOut.model_validate(s)
@@ -84,6 +100,8 @@ async def create_source(
 @router.patch("/{source_id}", dependencies=[Depends(require_csrf)])
 async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
     changes = body.model_dump(exclude_unset=True)
+    if "name" in changes:
+        changes["name"] = _clean_name(changes["name"])
     # config 변경 시 + enabled=true 재활성화 시 검증한다 — 후자는 API 검증 도입 전에
     # 저장된 무효 config 소스를 그대로 켜서 poller 만 영구 실패하는 상태를 막는다(리뷰 #2).
     if "config" in changes or changes.get("enabled") is True:

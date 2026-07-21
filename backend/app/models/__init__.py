@@ -105,6 +105,8 @@ class SnsAccountSecret(Model):
 class Source(Model):
     id = fields.IntField(primary_key=True)
     user = fields.ForeignKeyField("models.User", related_name="sources")
+    # 표시용 이름(예: 커뮤니티/카페 이름). 선택 — 없으면 FE 가 config 값(URL 등)으로 폴백.
+    name = fields.CharField(max_length=100, null=True)
     type = fields.CharEnumField(SourceType, max_length=16)
     config = fields.JSONField()
     poll_interval_sec = fields.IntField(default=300)
