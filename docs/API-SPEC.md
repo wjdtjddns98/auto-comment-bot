@@ -35,10 +35,13 @@ Req `{ "email": "...", "password": "..." }` → 200 + 세션쿠키 `{ "id", "ema
 ## 소스 (admin)
 
 ### `GET /api/sources`
-200 `[{ id, type, config, poll_interval_sec, enabled, last_success_at, health_status, backoff_until }]`
+200 `[{ id, name, type, config, poll_interval_sec, enabled, last_success_at, health_status, backoff_until }]`
 
 ### `POST /api/sources`
-Req `{ type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }` → 201 source.
+Req `{ name?: string(≤100), type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }` → 201 source.
+
+> `name`(선택): 표시용 이름(예: 커뮤니티/카페 이름). 미설정(null)이면 FE 는 config 값(URL·검색어)으로
+> 폴백 표시. 공백뿐인 값은 null 로 정규화. PATCH 에서 명시적 `name: null` = 이름 제거.
 
 > `config` 는 **타입별 스키마로 검증**된다(등록·수정 시점 422, 미지의 키 불허):
 > - `community`: `{ "rss_url": "https://..." }` (http/https URL 필수)
@@ -51,7 +54,7 @@ Req `{ type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }`
 > userinfo 포함 URL(`https://user:pw@...`)은 422 (자격증명이 config 로 저장되는 것 차단).
 
 ### `PATCH /api/sources/{id}`
-Req(부분) `{ enabled?, poll_interval_sec?, config? }` → 200. `config` 는 위 타입별 스키마로 검증(422).
+Req(부분) `{ name?, enabled?, poll_interval_sec?, config? }` → 200. `config` 는 위 타입별 스키마로 검증(422). `name: null` = 이름 제거.
 `enabled: true` 재활성화 시에는 저장된 config 도 재검증한다 — 무효 config 소스를 그대로 켤 수 없다(422).
 
 ### `DELETE /api/sources/{id}` → 204.

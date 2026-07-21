@@ -65,6 +65,42 @@ async def test_sources_crud_roundtrip(admin_session):
     assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 404
 
 
+async def test_source_name_lifecycle(admin_session):
+    """소스 표시용 이름(선택): 등록·수정·제거(null)·공백 정리·상한 100자."""
+    client, csrf = admin_session
+    r = await client.post(
+        "/api/sources",
+        json={"type": "community", "name": "  강아지 커뮤니티  ",
+              "config": {"rss_url": "https://ex.am/feed"}},
+        headers=csrf,
+    )
+    assert r.status_code == 201
+    src = r.json()
+    assert src["name"] == "강아지 커뮤니티"  # 양끝 공백 정리
+    try:
+        # 이름 변경
+        r = await client.patch(f"/api/sources/{src['id']}", json={"name": "새 이름"}, headers=csrf)
+        assert r.status_code == 200 and r.json()["name"] == "새 이름"
+        # 명시적 null = 이름 제거(FE 는 config 값으로 폴백 표시)
+        r = await client.patch(f"/api/sources/{src['id']}", json={"name": None}, headers=csrf)
+        assert r.status_code == 200 and r.json()["name"] is None
+        # 공백뿐인 이름도 미설정으로 정규화
+        r = await client.patch(f"/api/sources/{src['id']}", json={"name": "   "}, headers=csrf)
+        assert r.status_code == 200 and r.json()["name"] is None
+        # 상한 100자 초과 → 422
+        r = await client.post(
+            "/api/sources",
+            json={"type": "community", "name": "a" * 101,
+                  "config": {"rss_url": "https://ex.am/feed"}},
+            headers=csrf,
+        )
+        assert r.status_code == 422
+        # (이름 없는 등록은 test_sources_crud_roundtrip 이 커버 — 응답에 name 키 포함 확인만)
+        assert "name" in src
+    finally:
+        await client.delete(f"/api/sources/{src['id']}", headers=csrf)
+
+
 async def test_source_unsupported_type_422(admin_session):
     # 어댑터 미구현 타입(naver_cafe)은 등록 자체를 거부 — "정상처럼 보이는데 수집 안 됨" 방지
     client, csrf = admin_session
