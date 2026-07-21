@@ -73,6 +73,7 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 - **FR-12** `reply_actions`는 matched_post당 `action='sent'` 최대 1건을 **DB partial unique index**로 강제한다. *(MUST-FIX #1)*
 - **FR-13** 전송 실패는 **자동 재시도하지 않는다**(스팸 방지). reviewer의 수동 재시도만 허용, 재시도는 새 `reply_actions` 행.
 - **FR-14** `sending`에 정체된 행(프로세스 crash 등)은 `sending_claimed_at` 기준 N분 초과 시 reconciliation sweep이 `reviewing`으로 되돌린다(또는 수동 reset). 외부 전송 멱등성: idempotency-key 지원 시 사용, 불가 시 **at-most-once(타임아웃=미전송 처리)** 정책 명시. *(MUST-FIX #4)*
+  > ⚠️ OQ-1 닫힘(2026-07-21): idempotency-key **미지원** 확인 — 본 항목의 멱등성 분기·sweep 복귀 정책은 `docs/M2-SEND-RECONCILIATION.md` 의 unknown-outcome 조정 설계로 M2 에서 대체된다(체크리스트 R6 에서 본문 갱신 예정).
 - **FR-15** `can_write=False` 소스는 전송 대신 클립보드 복사 문구를 제공하고 `reply_actions`에 `approved`만 기록.
 
 ### 감사 & 관측 (Audit & Observability)
@@ -147,7 +148,8 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 ---
 
 ## 10. Open Questions (개발 전 확인)
-- OQ-1. Threads/Graph API가 게시에 **idempotency-key**를 지원하는가? (FR-14 최선책 성립 여부 — M0/M1 조사)
+- ~~OQ-1. Threads/Graph API가 게시에 **idempotency-key**를 지원하는가? (FR-14 최선책 성립 여부 — M0/M1 조사)~~
+  **→ 닫힘(2026-07-21): 미지원.** unknown-outcome 조회·조정 절차로 대체 — 설계는 `docs/M2-SEND-RECONCILIATION.md` (M2 선결조건 이행).
 - OQ-2. Meta 앱 심사 리드타임/요건? (M2 write 일정에 영향)
 - OQ-3. 대상 네이버 카페의 RSS/검색 노출 범위(본문 접근 한계)?
 
