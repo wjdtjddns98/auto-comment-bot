@@ -1,0 +1,342 @@
+"""Threads(Meta) 어댑터 — 키워드 수집(read) + 답글 전송(write) + 조정 조회.
+
+공식 Threads API 만 사용한다(불변식 ④). 인증 토큰은 sns_account_secrets 의
+Fernet 암호문을 전송/수집 시점에만 복호해 **Authorization 헤더로만** 보낸다 —
+URL·예외 메시지·로그에 절대 싣지 않는다(불변식 ③, M2 조정 설계 R7).
+
+전송 실패 분류(M2 조정 설계 §3.2 — 단계별 분류):
+- 컨테이너 생성 단계의 모든 실패 → SendError(확정 실패, 게시 위험 없음)
+- publish 단계: 401/403/429 + 400 중 유효성/OAuth 계열 Meta code 만 → SendError,
+  그 외 전부(5xx·408·409·목록 밖 4xx·transient 400·타임아웃·커넥션 오류)
+  → SendOutcomeUnknown(container_id 보존)
+
+config: {"query": "...", "sns_account_id": N} — 수집 인증에 쓸 본인 threads 계정.
+"""
+import asyncio
+from datetime import UTC, datetime
+
+import httpx
+from pydantic import BaseModel, ConfigDict, Field
+
+from app import crypto
+from app.models import AccountStatus, Platform, SnsAccount, SnsAccountSecret, Source
+from app.sources.base import (
+    FetchedPost,
+    FetchedReply,
+    FetchError,
+    RateLimitedError,
+    SendError,
+    SendOutcomeUnknown,
+)
+
+_API = "https://graph.threads.net/v1.0"
+_TIMEOUT = 15.0
+_UA = "sns-keyword-monitor/0.1 (polite; contact admin)"
+# Threads 텍스트 게시 상한(공식 500자). ApproveIn 상한(2000자)보다 좁다 —
+# 초과분은 컨테이너 생성 전에 확정 실패로 거른다.
+MAX_TEXT_LEN = 500
+_MAX_CONTENT_CHARS = 20_000  # 수집 본문 상한(rss 와 동일)
+_REPLIES_PAGE_CAP = 10  # 조정 조회 cursor 순회 상한(폭주 방어)
+
+# publish 단계에서 "요청이 수행되지 않았음이 명확"한 상태코드 — 그 외 응답/무응답은
+# 전부 결과 불명. 목록을 임의로 넓히지 않는다(fail-safe: 확정 실패는 증명 책임을 진다).
+# 400 은 제외: Meta 계열은 일시 오류(error code 1·2)도 HTTP 400 으로 내려보내는 사례가
+# 있어 code 기반으로 세분한다(_publish_400_is_definite — 어댑터 1차 적대 리뷰 중요-1).
+_PUBLISH_DEFINITE_FAIL = {401, 403, 429}
+# HTTP 400 중 "요청 미수행 명확"으로 취급하는 Meta error code — 유효성/OAuth/권한 계열.
+# 목록 밖(특히 1 "API Unknown"·2 "API Service") 은 결과 불명으로 남긴다.
+_DEFINITE_400_CODES = {100, 190, 200, 10}
+
+
+def _client() -> httpx.AsyncClient:
+    # 테스트가 이 팩토리를 교체해 MockTransport 를 주입한다.
+    return httpx.AsyncClient(base_url=_API, timeout=_TIMEOUT, headers={"User-Agent": _UA})
+
+
+def _auth(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _error_code(resp: httpx.Response) -> int | None:
+    try:
+        return int(resp.json().get("error", {}).get("code"))
+    except Exception:  # noqa: BLE001 - 비 JSON/형식 이상
+        return None
+
+
+def _error_summary(resp: httpx.Response) -> str:
+    """응답 에러를 audit 안전 텍스트로 — Meta 에러 JSON 의 code/type 만 쓰고
+    message(요청 원문 echo 가능)는 서버 로그로도 보내지 않는다."""
+    try:
+        err = resp.json().get("error", {})
+        detail = f" (code={err.get('code')}, type={err.get('type')})"
+    except Exception:  # noqa: BLE001 - 비 JSON 응답
+        detail = ""
+    return f"Threads API HTTP {resp.status_code}{detail}"
+
+
+def _publish_definite_fail(resp: httpx.Response) -> bool:
+    """publish 응답이 "요청 미수행 명확"(확정 실패)인가 — 아니면 결과 불명."""
+    if resp.status_code in _PUBLISH_DEFINITE_FAIL:
+        return True
+    if resp.status_code == 400:
+        code = _error_code(resp)
+        return code in _DEFINITE_400_CODES
+    return False
+
+
+async def _load_token(account: SnsAccount | None, exc_cls: type[Exception]) -> str:
+    """계정 → access_token. 실패는 exc_cls(전송 경로 SendError / 수집 경로 FetchError) —
+    메시지에 토큰·암호문을 절대 싣지 않는다."""
+    if account is None:
+        raise exc_cls("SNS 계정이 지정되지 않았습니다")
+    secret = await SnsAccountSecret.get_or_none(account_id=account.id)
+    if secret is None:
+        raise exc_cls("계정 자격증명이 등록되어 있지 않습니다")
+    try:
+        creds = crypto.decrypt_credentials(secret.encrypted_credentials)
+    except Exception as exc:  # noqa: BLE001 - 키 미설정/회전 실패 등
+        raise exc_cls("자격증명 복호화 실패 — 암호화 키 설정을 확인하세요") from exc
+    token = creds.get("access_token")
+    if not token or not isinstance(token, str):
+        raise exc_cls("자격증명에 access_token 이 없습니다")
+    return token
+
+
+def _parse_ts(value) -> datetime | None:
+    """Threads timestamp(예: 2026-07-21T09:00:00+0000) → aware datetime."""
+    if not value:
+        return None
+    try:
+        ts = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=UTC)
+
+
+class ThreadsConfig(BaseModel):
+    """threads 소스 config 스키마 — 등록/수정 시점에 API 계층이 검증한다."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    query: str = Field(min_length=1, max_length=100)  # 키워드 검색어
+    sns_account_id: int  # 수집 인증에 쓸 threads 계정(본인 소유)
+
+
+class ThreadsAdapter:
+    can_write = True
+    config_model = ThreadsConfig
+
+    # ── read: 키워드 수집 ─────────────────────────────────────────────────
+
+    async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:
+        cfg = source.config or {}
+        account = await SnsAccount.get_or_none(id=cfg.get("sns_account_id"))
+        if account is None or account.platform != Platform.threads:
+            raise FetchError("config.sns_account_id 의 threads 계정을 찾을 수 없습니다")
+        if account.status != AccountStatus.active:
+            raise FetchError("수집 계정이 만료/회수 상태입니다")
+        token = await _load_token(account, FetchError)
+        params = {
+            "q": cfg.get("query") or "",
+            # 모니터링 목적이라 최신순(RECENT) — TOP(인기순)은 첫 페이지가 인기 글로
+            # 고정돼 신규 매칭 글을 체계적으로 놓친다(어댑터 1차 적대 리뷰 중요-4).
+            "search_type": "RECENT",
+            "fields": "id,text,username,permalink,timestamp",
+        }
+        async with _client() as client:
+            try:
+                resp = await client.get(
+                    "/keyword_search", params=params, headers=_auth(token)
+                )
+            except httpx.HTTPError as exc:
+                raise FetchError(f"Threads 검색 요청 실패: {type(exc).__name__}") from exc
+        self._raise_read_errors(resp)
+        posts = []
+        # 첫 페이지만 수집 — 주기 폴링 + dedup(unique 제약)이 연속성을 보장한다.
+        for item in (resp.json().get("data") or []):
+            media_id = item.get("id")
+            text = (item.get("text") or "").strip()
+            if not media_id or not text:
+                continue
+            posts.append(
+                FetchedPost(
+                    external_post_id=str(media_id),
+                    content=text[:_MAX_CONTENT_CHARS],
+                    author=(item.get("username") or None),
+                    url=(item.get("permalink") or None),
+                    published_at=_parse_ts(item.get("timestamp")),
+                )
+            )
+        return posts
+
+    # ── write: 답글 전송 (호출 경로는 사람 승인 approve/retry 뿐 — 불변식 ①) ──
+
+    async def send_reply(self, source: Source, post, body: str, account) -> str:
+        # 로컬 검증이 최상단 — 네트워크 호출 전에 거를 수 있는 확정 실패를 먼저.
+        if len(body) > MAX_TEXT_LEN:
+            raise SendError(f"본문이 Threads 상한({MAX_TEXT_LEN}자)을 초과합니다")
+        token = await _load_token(account, SendError)
+        # 판정 키 확보(M2 조정 설계 §3.1·R7): 전송 전에 platform_username 이 저장돼
+        # 있어야 결과 불명 시 조정이 가능하다. 핸들 변경 시 stale 값으로 조정이 결정적
+        # 오판(미게시→retry→이중 게시)하지 않게 **전송마다** 갱신한다(2차 리뷰 중요-1).
+        # 이 단계의 어떤 실패든 전송 전 — 확정 실패로 분류한다(2차 리뷰 사소-2).
+        try:
+            account.platform_username = (await self._get_username(token))[:255]
+            await account.save(update_fields=["platform_username"])
+        except SendError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - save() 등 DB 오류 포함
+            raise SendError("판정 키(platform_username) 갱신 실패") from exc
+
+        async with _client() as client:
+            # 1단계: 답글 컨테이너 생성 — 모든 실패는 확정 실패(발행은 별도 호출).
+            try:
+                resp = await client.post(
+                    "/me/threads",
+                    data={
+                        "media_type": "TEXT",
+                        "text": body,
+                        "reply_to_id": post.external_post_id,
+                    },
+                    headers=_auth(token),
+                )
+            except httpx.HTTPError as exc:
+                raise SendError(f"컨테이너 생성 요청 실패: {type(exc).__name__}") from exc
+            if resp.status_code != 200:
+                raise SendError(f"컨테이너 생성 실패 — {_error_summary(resp)}")
+            container_id = str(resp.json().get("id") or "")
+            if not container_id:
+                raise SendError("컨테이너 생성 응답에 id 없음")
+
+            # 2단계: 발행 — 여기서부터의 불확실성은 전부 결과 불명(§3.2).
+            try:
+                resp = await client.post(
+                    "/me/threads_publish",
+                    data={"creation_id": container_id},
+                    headers=_auth(token),
+                )
+            except httpx.HTTPError as exc:
+                raise SendOutcomeUnknown(
+                    f"publish 응답 미수신: {type(exc).__name__}", container_id=container_id
+                ) from exc
+            if _publish_definite_fail(resp):
+                raise SendError(f"publish 거부 — {_error_summary(resp)}")
+            if resp.status_code != 200:
+                raise SendOutcomeUnknown(
+                    f"publish 결과 불명 — {_error_summary(resp)}", container_id=container_id
+                )
+            media_id = str(resp.json().get("id") or "")
+            if not media_id:
+                # 200 인데 id 없음 — 발행됐을 수 있다. 확정 실패로 좁히지 않는다.
+                raise SendOutcomeUnknown("publish 200 응답에 id 없음", container_id=container_id)
+            return media_id
+
+    # ── 조정: 대상 글 답글 read-only 조회 (M2 조정 설계 §3.4) ────────────────
+
+    async def fetch_replies(
+        self, source: Source, target_media_id: str, account, since: datetime
+    ) -> list[FetchedReply]:
+        # 경로 주입 방어: media id 는 숫자 문자열이어야 한다 — `?`·`/` 삽입으로 같은
+        # 호스트의 다른 엔드포인트를 토큰 실린 채 치는 경로 차단(1차 적대 리뷰 사소-7).
+        if not target_media_id.isdigit():
+            raise FetchError("target_media_id 형식이 올바르지 않습니다")
+        token = await _load_token(account, FetchError)
+        replies: list[FetchedReply] = []
+        # 최신순은 가정이 아니라 계약이어야 한다 — reverse 를 명시해 since 조기 중단이
+        # 플랫폼 기본값 변경에 흔들리지 않게 한다(1차 적대 리뷰 중요-3). limit 상향으로
+        # 페이지 캡 내 커버리지도 넓힌다.
+        base_params = {"fields": "id,username,text,timestamp", "reverse": "true", "limit": "100"}
+        params = dict(base_params)
+        async with _client() as client:
+            for _ in range(_REPLIES_PAGE_CAP):
+                try:
+                    resp = await client.get(
+                        f"/{target_media_id}/replies", params=params, headers=_auth(token)
+                    )
+                except httpx.HTTPError as exc:
+                    raise FetchError(f"답글 조회 요청 실패: {type(exc).__name__}") from exc
+                self._raise_read_errors(resp)
+                payload = resp.json()
+                stop = False
+                for item in (payload.get("data") or []):
+                    ts = _parse_ts(item.get("timestamp"))
+                    if ts is None or not item.get("id"):
+                        continue
+                    # 최신순(reverse=true 명시) — since 이전이 나오면 순회 중단
+                    if ts < since:
+                        stop = True
+                        break
+                    replies.append(
+                        FetchedReply(
+                            external_reply_id=str(item["id"]),
+                            username=item.get("username") or "",
+                            text=item.get("text") or "",
+                            timestamp=ts,
+                        )
+                    )
+                after = (payload.get("paging") or {}).get("cursors", {}).get("after")
+                if stop or not after:
+                    return replies
+                params = dict(base_params, after=after)
+        # 캡 소진 = since 에 도달하지 못한 부분 결과 — 조용히 반환하면 조정이 "미게시"로
+        # 오판할 수 있다(1차 적대 리뷰 중요-2). 조회 실패로 취급해 attempts 를 동결한다.
+        raise FetchError("답글 조회 페이지 상한 초과 — 부분 결과로는 판정하지 않습니다")
+
+    # ── 내부 헬퍼 ────────────────────────────────────────────────────────
+
+    async def _get_username(self, token: str) -> str:
+        async with _client() as client:
+            try:
+                resp = await client.get(
+                    "/me", params={"fields": "username"}, headers=_auth(token)
+                )
+            except httpx.HTTPError as exc:
+                raise SendError(f"계정 username 조회 실패: {type(exc).__name__}") from exc
+        if resp.status_code != 200:
+            raise SendError(f"계정 username 조회 실패 — {_error_summary(resp)}")
+        username = resp.json().get("username")
+        if not username:
+            raise SendError("계정 username 조회 응답에 username 없음")
+        return str(username)
+
+    @staticmethod
+    def _raise_read_errors(resp: httpx.Response) -> None:
+        """read 경로 공통 에러 매핑 — 429/403 은 backoff 대상(불변식 ④, R7)."""
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("retry-after")
+            sec = float(retry_after) if retry_after and retry_after.isdigit() else None
+            raise RateLimitedError(_error_summary(resp), retry_after_sec=sec)
+        if resp.status_code == 403:
+            raise RateLimitedError(_error_summary(resp))
+        if resp.status_code != 200:
+            raise FetchError(_error_summary(resp))
+
+
+async def probe_republish(account_id: int, reply_to: str, text: str) -> None:
+    """R3 실측 프로브(사람이 CLI 로 명시 실행) — 발행된 컨테이너에 threads_publish 를
+    재호출하면 무슨 일이 일어나는지 관찰한다. 결과는 docs/M2-SEND-RECONCILIATION.md
+    §1·§3.5 에 반영할 것. 실제 답글이 1건 게시된다 — 테스트 계정/게시물로 실행하라.
+    """
+    account = await SnsAccount.get_or_none(id=account_id)
+    token = await _load_token(account, SendError)
+    async with _client() as client:
+        resp = await client.post(
+            "/me/threads",
+            data={"media_type": "TEXT", "text": text, "reply_to_id": reply_to},
+            headers=_auth(token),
+        )
+        print(f"[1] 컨테이너 생성: HTTP {resp.status_code} → {resp.json()}")
+        resp.raise_for_status()
+        creation_id = resp.json()["id"]
+
+        resp = await client.post(
+            "/me/threads_publish", data={"creation_id": creation_id}, headers=_auth(token)
+        )
+        print(f"[2] 1차 publish: HTTP {resp.status_code} → {resp.json()}")
+        await asyncio.sleep(3)
+        resp = await client.post(
+            "/me/threads_publish", data={"creation_id": creation_id}, headers=_auth(token)
+        )
+        # 핵심 관찰점: 같은 media id 반환(사실상 idempotent)인가, 에러인가
+        print(f"[3] 2차 publish(재호출): HTTP {resp.status_code} → {resp.json()}")

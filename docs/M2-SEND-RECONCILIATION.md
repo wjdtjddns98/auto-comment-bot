@@ -76,8 +76,12 @@ class SendOutcomeUnknown(Exception): ...   # 결과 불명 — 조정 필요. co
 
 Threads write 어댑터 분류 규칙(§2 의 기준을 코드로 — 단계별 분류이지 "응답 수신 여부" 분류가 아니다):
 - 컨테이너 생성 단계의 모든 실패 → `SendError`(확정 실패). 게시 위험 없음.
-- publish 단계의 401/403/429/400 → `SendError`(요청 미수행이 명확).
-- publish 단계의 **5xx·408·409·타임아웃·커넥션 오류·응답 미수신** → `SendOutcomeUnknown(container_id=...)`.
+- publish 단계의 401/403/429 → `SendError`(인증/스로틀 게이트 — 요청 미수행이 명확).
+- publish 단계의 **400 은 Meta error code 로 세분**(어댑터 1차 적대 리뷰 중요-1): 유효성/OAuth
+  계열 code(100·190·200·10 등)만 `SendError`, **transient 계열(code 1 "API Unknown"·2 "API
+  Service")과 code 불명은 결과 불명** — Meta 는 일시 오류도 HTTP 400 으로 내려보내는 사례가 있다.
+- publish 단계의 **그 외 전부(5xx·408·409·목록 밖 4xx·타임아웃·커넥션 오류·응답 미수신)** →
+  `SendOutcomeUnknown(container_id=...)`.
 - `_approve` 의 `asyncio.wait_for` TimeoutError → `SendOutcomeUnknown` 과 동일 취급.
   (현재 M1 은 TimeoutError 를 failed 로 회계 — M1 은 write 어댑터가 없어(mock/can_write=False)
   실위험이 없었다. M2 에서 이 분기를 바꾼다.)
@@ -187,7 +191,11 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
       분기(`verify_meta` 유무로 verify_pending/reviewing 분기) + 게이트: verify_pending 에서
       approve/retry 409·**ignore 허용**
 - [ ] R3. **실측**: 발행된 컨테이너에 `threads_publish` 재호출 시 동작(및 답글 rate limit 한도)
-      확인 → 본 문서 §1·§3.5 갱신(idempotent 확인 시 조정 1차 수단 승격) — write 어댑터 PR 에서
+      확인 → 본 문서 §1·§3.5 갱신(idempotent 확인 시 조정 1차 수단 승격).
+      프로브 준비됨: `python -m app.cli threads-probe-republish --account-id N --reply-to <media_id>`
+      — **실 토큰 확보(Meta 앱 심사, OQ-2) 후 테스트 계정으로 실행**(실게시 1건 발생).
+      같은 실측에서 `/replies?limit=100` 상한 허용 여부도 확인할 것(어댑터 2차 리뷰 사소-3
+      — 상한이 100 미만이면 조정 조회가 400 반복으로 attempts 동결 limbo)
 - [x] R4. 조정 잡(`app/reconcile.py`) + normalize 판정 단위 테스트(수동 답글 혼입·40자 미만
       본문·URL 포함 본문(앞/뒤 위치별)·timestamp 창·절단 prefix 판정 — `tests/test_reconcile.py`.
       동일 본문 답글 다수는 첫 매치 채택 — external_reply_id 오기록 가능성은 §3.6 과 같은
@@ -195,13 +203,16 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 - [ ] R5. FE 계약 공유: `verify_pending` 상태(ignore 만 허용)·`action:"unknown"` 응답·미게시 판정
       후 "직접 확인 권장" 문구·write 소스 approve 의 `sns_account_id` 필수(422) — \[FE 공유\] 이슈
 - [x] R6. PRD FR-14 문구를 본 설계로 갱신(§10 OQ-1 닫힘)
-- [ ] R7. **Threads write 어댑터 PR 가드레일**(1차 구현 적대 리뷰 F-3·F-4·F-10):
-      403→`RateLimitedError` 매핑(불변식 ④), 토큰은 요청 헤더로만·예외 메시지에 URL 원문
-      금지(불변식 ③ — `logger.exception` 트레이스백 경유 노출 차단), 기존 계정
-      `platform_username` 백필(`GET /me?fields=username`), 어댑터는 SourceAdapter Protocol 을
-      명시 상속하지 말 것(덕타이핑 — `fetch_replies` 미구현 감지 유지).
-      2차 구현 적대 리뷰 잔여(사소): 조정 전용 실패 시 health 배지가 poller 성공에 리셋되는
-      깜빡임(R-2), 향후 사용자 삭제 기능 도입 시 조정 종결 reviewer FK 방어(R-5)
+- [x] R7. **Threads write 어댑터 가드레일** — `app/sources/threads.py` 구현 반영:
+      read 경로 403/429→`RateLimitedError` 매핑(불변식 ④), 토큰은 Authorization 헤더로만
+      + 에러 요약은 Meta code/type 만(message 는 요청 echo 가능성으로 배제 — 불변식 ③),
+      `platform_username` 은 **send_reply 의 전송 직전 단계에서 매번 갱신**(등록 시점 네트워크
+      의존 제거 + 핸들 변경 시 stale 판정 키로 인한 결정적 오판 방지 — 이 단계 실패는 전송
+      전이라 확정 실패로 안전), Protocol 명시 상속 없음(덕타이핑), publish 확정 실패는
+      401/403/429 + 400 의 유효성/OAuth 계열 code 만(§3.2 세분 규칙) — 그 외 전부 결과 불명
+      (fail-safe).
+      잔여(후속): OAuth 콜백(API-SPEC §SNS 계정, OQ-2 심사 후), 조정 전용 실패 health 깜빡임
+      (2차 리뷰 R-2), 사용자 삭제 기능 도입 시 reviewer FK 방어(R-5)
 
 ## 참고 문서
 
