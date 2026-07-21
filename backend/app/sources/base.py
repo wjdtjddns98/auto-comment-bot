@@ -30,11 +30,30 @@ class FetchError(Exception):
 
 
 class SendError(Exception):
-    """답변 전송 실패 — approve 플로우가 failed 회계 + reviewing 복귀 후 502 로 변환한다.
+    """답변 전송의 **확정 실패** — 게시가 일어나지 않았음이 보장되는 실패만.
+    approve 플로우가 failed 회계 + reviewing 복귀(retry 안전) 후 502 로 변환한다.
+
+    분류 규칙(M2 조정 설계 §3.2 — 단계별 분류이지 "응답 수신 여부" 분류가 아니다):
+    컨테이너 생성 단계의 모든 실패, publish 단계의 401/403/429/400(요청 미수행 명확).
+    publish 단계의 5xx/408/409/타임아웃/커넥션 오류는 SendOutcomeUnknown 을 쓸 것.
 
     계약: 메시지는 audit 테이블에 저장되고 GET /api/matches/{id} 응답으로 노출된다 —
     자격증명·요청 헤더·토큰을 절대 포함하지 말 것(불변식 ③). SendError 이외의 예외
     원문은 API 계층이 응답/DB 로 내보내지 않는다."""
+
+
+class SendOutcomeUnknown(Exception):
+    """전송 **결과 불명** — 게시됐을 가능성을 배제할 수 없는 실패(publish 타임아웃·
+    커넥션 유실·5xx 등). approve 플로우가 unknown 회계 + verify_pending 전이로
+    재전송을 구조적으로 차단하고, 조정 잡이 실제 게시 여부를 확인한다(M2 조정 설계 §2).
+
+    메시지 계약은 SendError 와 동일(불변식 ③ — 안전한 텍스트만)."""
+
+    def __init__(self, message: str, container_id: str | None = None):
+        super().__init__(message)
+        # publish 직전까지 갔다면 컨테이너 ID 를 남긴다 — R3 실측으로 재발행 idempotency
+        # 가 확인되면 조정 1차 수단으로 쓸 수 있다(설계 §3.5).
+        self.container_id = container_id
 
 
 @dataclass(frozen=True)
@@ -44,6 +63,16 @@ class FetchedPost:
     author: str | None = None
     url: str | None = None
     published_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class FetchedReply:
+    """조정 잡이 대상 글의 답글 목록을 판정할 때 쓰는 최소 필드(설계 §3.4)."""
+
+    external_reply_id: str
+    username: str
+    text: str
+    timestamp: datetime
 
 
 class SourceAdapter(Protocol):
@@ -57,10 +86,21 @@ class SourceAdapter(Protocol):
         ...
 
     async def send_reply(self, source: Source, post, body: str, account) -> str:
-        """승인된 답변 전송 → external_reply_id 반환. 실패는 SendError.
+        """승인된 답변 전송 → external_reply_id 반환. 확정 실패는 SendError,
+        결과 불명(게시됐을 수 있음)은 SendOutcomeUnknown — 분류 규칙은 각 예외 docstring.
 
         can_write=False 어댑터에서는 절대 호출되지 않는다(approve 가 approved 기록으로
         분기). 호출 경로는 사람 승인(approve/retry) 엔드포인트뿐이다 — 불변식 ①."""
+        ...
+
+    async def fetch_replies(
+        self, source: Source, target_media_id: str, account, since: datetime
+    ) -> list[FetchedReply]:
+        """조정용 read-only 조회: 대상 글의 답글 목록(설계 §3.4). since(≈클레임 시각-스큐)
+        이전 timestamp 답글이 나오면 cursor 순회를 중단해도 된다 — 전체 페이지 순회 방지.
+        실패는 FetchError/RateLimitedError(429/403). write 가능 어댑터만 구현하면 된다 —
+        조정 잡은 미구현 어댑터(hasattr 부재)를 건너뛴다. 주의: Protocol 을 명시 상속하지
+        말 것(덕타이핑) — `...` 몸체가 상속되면 미구현 감지가 무력화된다."""
         ...
 
 

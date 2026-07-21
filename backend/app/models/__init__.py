@@ -49,6 +49,9 @@ class PostStatus(str, Enum):
     sending = "sending"
     replied = "replied"
     ignored = "ignored"
+    # 전송 결과 불명 — 조정(reconcile) 대기. CAS 클레임(new/reviewing) 대상이 아니라
+    # 재전송이 구조적으로 차단된다. ignore 만 허용(docs/M2-SEND-RECONCILIATION.md §3.1).
+    verify_pending = "verify_pending"
 
 
 class ReplyAction(str, Enum):
@@ -56,6 +59,7 @@ class ReplyAction(str, Enum):
     sent = "sent"
     failed = "failed"
     canceled = "canceled"
+    unknown = "unknown"  # 전송 결과 불명 발생 audit (M2 조정 설계 §3.1)
 
 
 class User(Model):
@@ -74,6 +78,9 @@ class SnsAccount(Model):
     user = fields.ForeignKeyField("models.User", related_name="sns_accounts")
     platform = fields.CharEnumField(Platform, max_length=16)
     display_name = fields.CharField(max_length=255)
+    # 플랫폼 계정 username — 조정 잡의 "우리 답글" 판정 키. 계정 등록·토큰 갱신 시점에
+    # 확보해 저장한다(조회 시점 확보는 토큰 만료 시 판정 불능 — M2 조정 설계 §3.1).
+    platform_username = fields.CharField(max_length=255, null=True)
     token_expires_at = fields.DatetimeField(null=True)
     status = fields.CharEnumField(AccountStatus, max_length=16, default=AccountStatus.active)
     created_at = fields.DatetimeField(auto_now_add=True)
@@ -149,6 +156,9 @@ class MatchedPost(Model):
     matched_at = fields.DatetimeField(auto_now_add=True)
     status = fields.CharEnumField(PostStatus, max_length=16, default=PostStatus.new)
     sending_claimed_at = fields.DatetimeField(null=True)  # sweep 회수용 (MUST-FIX #4)
+    # 조정 재료(M2 조정 설계 §3.1) — CAS 클레임 시 기록, 종결 시 null 청소. 비밀 없음.
+    # {target_media_id, claim_ts, attempts, reviewer_id, final_body, sns_account_id, container_id?}
+    verify_meta = fields.JSONField(null=True)
 
     class Meta:
         table = "matched_posts"

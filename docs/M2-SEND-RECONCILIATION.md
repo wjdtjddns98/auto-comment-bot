@@ -55,7 +55,8 @@ M1 approve 경로(`app/api/matches.py::_approve`)에서 `send_reply` 실패는 �
 - `ReplyAction` 에 **`unknown`** 추가: 결과 불명 발생 audit. 에러 요약 포함 — 기존
   `_safe_error` 급 필터링 동일 적용(불변식 ③).
 - `matched_posts` 에 **`verify_meta` JSONB** (nullable) 추가:
-  `{target_media_id, container_id?, claim_ts, attempts, reviewer_id, final_body}`.
+  `{target_media_id, container_id?, claim_ts, attempts, reviewer_id, final_body, sns_account_id}`.
+  (`sns_account_id` 는 조정 조회의 인증 계정 + `platform_username` 참조용 — 구현 시 추가.)
   **CAS 클레임 성공 직후·전송 호출 전에 기록**한다(예외 핸들러가 아니라) — 프로세스 크래시로
   예외 핸들러가 못 돈 잔재(sweep 회수분)에도 조정 재료(대상·본문·승인자)가 남아야 하기
   때문이다. 토큰 등 비밀 없음(불변식 ③ — final_body 는 사람이 승인한 게시 예정 본문).
@@ -85,11 +86,20 @@ Threads write 어댑터 분류 규칙(§2 의 기준을 코드로 — 단계별 
 
 ```
 except SendError            → (기존) failed 로그 + reviewing 복귀 → retry 허용 (+verify_meta 청소)
-except (SendOutcomeUnknown,
-        TimeoutError)       → unknown 로그 + verify_pending 전이(펜싱 유지) + verify_meta 갱신
+except Exception (그 외 전부) → unknown 로그 + verify_pending 전이(펜싱 유지) + verify_meta 갱신
                               응답: 502 {"action":"unknown","detail":"전송 결과 확인 중 —
                               자동 조정 후 재시도 가능해집니다"}
 ```
+
+**기본값은 unknown 쪽(fail-safe)** — SendOutcomeUnknown/타임아웃뿐 아니라 **정체불명 예외**
+(어댑터 응답 파싱 버그 등)도 publish 요청이 나간 뒤일 수 있으므로 결과 불명으로 회계한다.
+"확정 안전"(SendError)이 증명 책임을 진다(1차 구현 적대 리뷰 F-1).
+
+추가 사전 가드(1차 구현 적대 리뷰 F-2·F-4):
+- approve/retry 는 클레임 전에 `reply_actions(action='sent')` 존재를 확인 — DB 에 전송 증거가
+  있으면 상태와 무관하게 409 + replied 정합 회복(partial unique 의 사전 방어층).
+- 전송 가능(will_send) 소스의 approve 는 **`sns_account_id` 필수**(없으면 422) — 계정 없는
+  unknown 은 조정 판정 키가 없어 영구 limbo 가 되기 때문. \[FE 공유\] 계약에 포함.
 
 sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현행 일괄 reviewing 복귀에서
 코드 변경):
@@ -108,7 +118,8 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 잔재)이든 동일하게 동작한다(§3.1).
 
 1. `GET /{target_media_id}/replies?fields=id,username,text,timestamp` (필요 시 `/conversation`,
-   cursor 순회는 claim_ts 이전 timestamp 가 나오면 중단).
+   cursor 순회는 claim_ts 이전 timestamp 가 나오면 중단 — 어댑터 계약 `fetch_replies(source,
+   target_media_id, account, since≈claim_ts-스큐)` 의 since 가 중단 기준).
 2. **우리 답글 판정**: `username == platform_username` AND `timestamp >= claim_ts - 여유 60s`
    AND `normalize(text) == normalize(final_body)`.
    - 여유 60s = 서버↔플랫폼 클럭 스큐 + 발행 처리 지연을 합산한 보수치(claim_ts 는 우리 서버
@@ -122,7 +133,9 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
    해당 전송을 승인한 사람을 기록 — `reviewer` NOT NULL 유지). partial unique(action='sent')
    위반(IntegrityError) 시 기존 `_approve` 와 동일한 정합 회복 처리 — 조정 잡과 사람이
    경합해도 구조적으로 안전.
-4. **미발견** → `attempts += 1`. `attempts >= 5`(약 5분) 이면 **미게시 판정**:
+4. **미발견** → `attempts += 1`. `attempts >= 5`(약 5분) 이면, 먼저 `reply_actions(sent)` 존재를
+   확인해 **DB 에 전송 증거가 있으면 replied 정합 회복**(좀비 요청의 사후 audit 경합 —
+   1차 구현 적대 리뷰 F-2). 증거가 없을 때만 **미게시 판정**:
    `reply_actions(failed, "조정 완료 — 미게시 판정")`(reviewer·final_body 승계 동일) +
    `reviewing` 복귀(retry 허용). FE 에는 "재시도 전 대상 글에서 직접 확인 권장" 문구를 함께
    내려준다(잔여 위험 §3.6).
@@ -130,9 +143,10 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
      5분이면 충분. 경계값은 운영 설정으로 노출(`RECONCILE_MAX_ATTEMPTS`).
 5. 조회 자체가 실패하면 attempts 를 늘리지 않고 다음 주기로 — 조정은 read-only 라 반복해도
    부작용이 없다. 단:
-   - 429/5xx → source rate-limit 회계(backoff) 공유(불변식 ④).
-   - **401/403(토큰 만료·회수)** → audit 로그(에러 요약은 `_safe_error` 급 필터) + 소스 health
-     배지로 가시화(FR-18). 토큰 복구 시 자동 재개.
+   - 429/`RateLimitedError` → source rate-limit 회계(지수 backoff) 공유, backoff 중엔 조회 skip
+     (불변식 ④).
+   - 그 외 조회 실패(**401/403 토큰 만료·회수** 포함) → 소스 health 회계로 배지 가시화(FR-18,
+     에러 원문은 서버 로그에만 — 불변식 ③). 토큰 복구 시 자동 재개.
    - 조회 실패가 지속돼도 행이 갇히지 않도록 **verify_pending 에서 ignore 허용**(§3.1)이
      사람의 탈출구다 — 대상 글을 직접 확인하고 종료할 수 있다. approve/retry 는 계속 409.
 
@@ -166,18 +180,28 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 
 ## 4. M2 구현 체크리스트 (write 어댑터 착수 조건)
 
-- [ ] R1. 마이그레이션: `PostStatus.verify_pending`·`ReplyAction.unknown`·`matched_posts.verify_meta`
-      ·`sns_accounts.platform_username`(등록·토큰 갱신 시 `GET /me?fields=username` 저장)
-- [ ] R2. `SendOutcomeUnknown` 계약(publish 5xx/408/409 포함 — §3.2 분류표) + `_approve`/sweep
+- [x] R1. 마이그레이션: `PostStatus.verify_pending`·`ReplyAction.unknown`·`matched_posts.verify_meta`
+      ·`sns_accounts.platform_username` — 마이그레이션 4. (username 확보 API 연동은 Threads
+      write 어댑터 PR 에서 — `GET /me?fields=username`)
+- [x] R2. `SendOutcomeUnknown` 계약(publish 5xx/408/409 포함 — §3.2 분류표) + `_approve`/sweep
       분기(`verify_meta` 유무로 verify_pending/reviewing 분기) + 게이트: verify_pending 에서
       approve/retry 409·**ignore 허용**
 - [ ] R3. **실측**: 발행된 컨테이너에 `threads_publish` 재호출 시 동작(및 답글 rate limit 한도)
-      확인 → 본 문서 §1·§3.5 갱신(idempotent 확인 시 조정 1차 수단 승격)
-- [ ] R4. 조정 잡 + normalize 판정 단위 테스트(동일 본문 답글 다수·**수동 답글 혼입**·40자 미만
-      본문·URL 포함 본문·timestamp 창 판정)
+      확인 → 본 문서 §1·§3.5 갱신(idempotent 확인 시 조정 1차 수단 승격) — write 어댑터 PR 에서
+- [x] R4. 조정 잡(`app/reconcile.py`) + normalize 판정 단위 테스트(수동 답글 혼입·40자 미만
+      본문·URL 포함 본문(앞/뒤 위치별)·timestamp 창·절단 prefix 판정 — `tests/test_reconcile.py`.
+      동일 본문 답글 다수는 첫 매치 채택 — external_reply_id 오기록 가능성은 §3.6 과 같은
+      "과소 확정" 방향이라 이중 게시 무관)
 - [ ] R5. FE 계약 공유: `verify_pending` 상태(ignore 만 허용)·`action:"unknown"` 응답·미게시 판정
-      후 "직접 확인 권장" 문구 — \[FE 공유\] 이슈
-- [ ] R6. PRD FR-14 문구를 본 설계로 갱신(§10 OQ-1 닫힘)
+      후 "직접 확인 권장" 문구·write 소스 approve 의 `sns_account_id` 필수(422) — \[FE 공유\] 이슈
+- [x] R6. PRD FR-14 문구를 본 설계로 갱신(§10 OQ-1 닫힘)
+- [ ] R7. **Threads write 어댑터 PR 가드레일**(1차 구현 적대 리뷰 F-3·F-4·F-10):
+      403→`RateLimitedError` 매핑(불변식 ④), 토큰은 요청 헤더로만·예외 메시지에 URL 원문
+      금지(불변식 ③ — `logger.exception` 트레이스백 경유 노출 차단), 기존 계정
+      `platform_username` 백필(`GET /me?fields=username`), 어댑터는 SourceAdapter Protocol 을
+      명시 상속하지 말 것(덕타이핑 — `fetch_replies` 미구현 감지 유지).
+      2차 구현 적대 리뷰 잔여(사소): 조정 전용 실패 시 health 배지가 poller 성공에 리셋되는
+      깜빡임(R-2), 향후 사용자 삭제 기능 도입 시 조정 종결 reviewer FK 방어(R-5)
 
 ## 참고 문서
 

@@ -21,9 +21,11 @@ from app.auth import hash_password
 from app.models import (
     Keyword,
     MatchedPost,
+    Platform,
     ReplyAction,
     ReplyActionLog,
     Role,
+    SnsAccount,
     Source,
     SourceType,
     User,
@@ -82,6 +84,11 @@ async def test_m1_acceptance_flow(api_client, monkeypatch):
     )
     adapter = MockWriteAdapter()
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.community, adapter)
+    # 전송 소스 approve 는 SNS 계정 필수(M2) — mock write 어댑터도 동일 계약을 탄다
+    account = await SnsAccount.create(
+        user=admin, platform=Platform.community, display_name="e2e봇",
+        platform_username="e2e_bot",
+    )
     source_id = keyword_id = match_id = None
     try:
         # 1) 로그인 + CSRF — 이후 모든 호출은 세션 쿠키 기반 실 인증 경로
@@ -152,7 +159,7 @@ async def test_m1_acceptance_flow(api_client, monkeypatch):
         # 6) 승인 → (mock)send — CAS 클레임·타임아웃·audit 은 실제 approve 경로
         resp = await api_client.post(
             f"/api/matches/{match_id}/approve",
-            json={"final_body": FINAL_BODY},
+            json={"final_body": FINAL_BODY, "sns_account_id": account.id},
             headers=csrf,
         )
         assert resp.status_code == 200, resp.text
@@ -179,7 +186,7 @@ async def test_m1_acceptance_flow(api_client, monkeypatch):
         # 재승인 시도 → 409 + 전송 어댑터 추가 호출 없음 — 불변식 ②(이중 발송 금지)
         resp = await api_client.post(
             f"/api/matches/{match_id}/approve",
-            json={"final_body": "중복 시도"},
+            json={"final_body": "중복 시도", "sns_account_id": account.id},
             headers=csrf,
         )
         assert resp.status_code == 409
@@ -195,4 +202,5 @@ async def test_m1_acceptance_flow(api_client, monkeypatch):
         if source_id is not None:
             poller.forget_source(source_id)
             await Source.filter(id=source_id).delete()
+        await account.delete()
         await admin.delete()

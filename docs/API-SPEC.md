@@ -96,7 +96,8 @@ Req `{ platform, display_name, credentials: {...} }` → 201 `{ id, user_id, pla
 ## 매칭 (reviewer)
 
 ### `GET /api/matches`
-Query: `status`(new|reviewing|sending|replied|ignored), `source_id`, `page`, `size`.
+Query: `status`(new|reviewing|sending|replied|ignored|verify_pending), `source_id`, `page`, `size`.
+> `verify_pending`(M2): 전송 결과 불명 — 자동 조정 대기. **읽기 전용 뱃지로 표시**, approve/retry 는 409, ignore 만 가능. 조정이 끝나면 서버가 `replied`(게시 확인) 또는 `reviewing`(미게시 판정 — retry 재개) 으로 전이시킨다.
 200 `{ items: [{ id, source_id, external_post_id, author, url, content, matched_keyword_id, published_at, matched_at, status }], total }`
 
 ### `GET /api/matches/{id}`
@@ -104,21 +105,27 @@ Query: `status`(new|reviewing|sending|replied|ignored), `source_id`, `page`, `si
 
 ### `POST /api/matches/{id}/approve` — 핵심 (CSRF 필수)
 Req `{ template_id?: int, final_body: string, sns_account_id?: int }`
+> **M2**: 전송 가능(write) 소스(threads)의 approve/retry 는 `sns_account_id` **필수** — 없으면 422.
+> (계정 없이는 전송도, 결과 불명 시 조정도 불가.) 읽기 전용 소스(네이버/커뮤니티)는 종전대로 선택.
 동작(MUST-FIX #1):
 1. CAS: `status IN('new','reviewing') → 'sending'`. **0행이면 409 Conflict**(이미 처리 중/완료).
-2. 소스 `can_write=true`: `adapter.send_reply` → 성공 `reply_actions(action='sent', external_reply_id)` + `matched_posts.status='replied'` → **200** `{ action:'sent', external_reply_id }`. 실패 → `reply_actions(action='failed', error)` + status 복귀 `reviewing` → **502** `{ action:'failed', detail }`.
+2. 소스 `can_write=true`: `adapter.send_reply` → 성공 `reply_actions(action='sent', external_reply_id)` + `matched_posts.status='replied'` → **200** `{ action:'sent', external_reply_id }`. 확정 실패 → `reply_actions(action='failed', error)` + status 복귀 `reviewing` → **502** `{ action:'failed', detail }`. **결과 불명**(타임아웃/응답유실/5xx, M2) → `reply_actions(action='unknown', error)` + status `verify_pending` → **502** `{ action:'unknown', detail:"전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다" }` — 이때 retry 버튼을 노출하지 말 것(409 남).
 3. `can_write=false`(네이버/커뮤니티): 전송 안 함. `reply_actions(action='approved')` 기록 + status `replied` → **200** `{ action:'approved', clipboard_body }`(수동 복사용).
 - 멱등성: `reply_actions` partial unique(action='sent')로 DB가 이중 sent 차단. 재요청은 409.
 - 입력 검증(모두 CAS 클레임 전 — 상태 안 건드림): `final_body` 공백뿐/2000자 초과 422 ·
   `template_id` 미존재/비활성 422 · `sns_account_id` 는 본인 계정만(admin 전체)·active·
   소스 타입과 플랫폼 일치, 아니면 422.
-- 전송 상한 120초 — 초과 시 강제 취소 후 실패 처리(502·재시도 가능).
-- 정체 회수: `sending` 클레임 후 10분 경과 시 sweep 이 `reviewing` 으로 복귀시킨다(재시도 가능).
-  상태 갱신은 클레임 시각 펜싱 — 회수 후 사람이 바꾼 상태를 늦은 요청이 덮어쓰지 않는다.
+- 전송 상한 120초 — 초과 시 강제 취소 후 **결과 불명 처리**(502 `action:'unknown'` → 조정 대기).
+- 정체 회수: `sending` 클레임 후 10분 경과 시 sweep 이 회수한다 — 전송 착수분은 `verify_pending`
+  (조정 대기), 착수 전 잔재는 `reviewing`(재시도 가능). 상태 갱신은 클레임 시각 펜싱 —
+  회수 후 사람이 바꾼 상태를 늦은 요청이 덮어쓰지 않는다.
+- 미게시 판정으로 `reviewing` 복귀한 매칭의 이력에는 `action='failed'` + "직접 확인 권장" 문구가
+  남는다 — FE 는 retry 전 확인을 권장 표시.
 
 ### `POST /api/matches/{id}/ignore` (CSRF)
 → `matched_posts.status='ignored'` → 200 `{ status: "ignored" }` + `reply_actions(action='canceled')` audit.
-`new|reviewing` 에서만 가능 — 그 외 409, 없는 매칭 404.
+`new|reviewing|verify_pending` 에서 가능 — 그 외 409, 없는 매칭 404.
+(`verify_pending` 의 ignore 는 조정 장기 실패 시 사람의 탈출구 — M2 조정 설계 §3.1.)
 
 ### `POST /api/matches/{id}/retry` (CSRF)
 전송 실패건 수동 재시도(FR-13). status가 `reviewing`이어야 함(그 외 409) → approve와 동일 CAS 경로 재실행. 새 `reply_actions` 행.

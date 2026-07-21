@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     poller_enabled: bool = True
     poller_tick_sec: int = Field(default=30, ge=1)
 
+    # 조정 잡(M2 조정 설계 §3.4-4): 이 횟수만큼 조회에서 못 찾으면 미게시 판정 → retry 개방.
+    # 주기 60초 기준 기본 5회 ≈ 5분 — publish 반영 지연(권장 30초)의 보수적 상회치.
+    reconcile_max_attempts: int = Field(default=5, ge=1)
+
     @property
     def cookie_secure(self) -> bool:
         return self.app_env != "dev"

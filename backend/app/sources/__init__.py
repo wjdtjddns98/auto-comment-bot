@@ -2,9 +2,11 @@
 from app.models import SourceType
 from app.sources.base import (  # noqa: F401 - 편의 re-export
     FetchedPost,
+    FetchedReply,
     FetchError,
     RateLimitedError,
     SendError,
+    SendOutcomeUnknown,
     SourceAdapter,
 )
 from app.sources.rss import RssAdapter

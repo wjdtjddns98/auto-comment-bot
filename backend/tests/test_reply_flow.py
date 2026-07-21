@@ -25,7 +25,7 @@ from app.models import (
     SourceType,
     User,
 )
-from app.sources.base import SendError
+from app.sources.base import SendError, SendOutcomeUnknown
 
 pytestmark = pytest.mark.db
 
@@ -37,8 +37,9 @@ class FakeWriteAdapter:
 
     can_write = True
 
-    def __init__(self, *, fail: bool = False, delay: float = 0.0):
+    def __init__(self, *, fail: bool = False, unknown: bool = False, delay: float = 0.0):
         self.fail = fail
+        self.unknown = unknown
         self.delay = delay
         self.send_calls = 0
 
@@ -49,6 +50,8 @@ class FakeWriteAdapter:
         self.send_calls += 1
         if self.delay:
             await asyncio.sleep(self.delay)
+        if self.unknown:
+            raise SendOutcomeUnknown("mock publish 응답 유실", container_id="mock-container-1")
         if self.fail:
             raise SendError("mock 전송 실패")
         return f"mock-reply-{post.id}-{self.send_calls}"
@@ -74,6 +77,14 @@ async def _make_match(user: User, source_type: SourceType = SourceType.community
     )
     return await MatchedPost.create(
         source=source, external_post_id=f"ext-{uuid.uuid4().hex}", content="본문"
+    )
+
+
+async def _make_threads_account(user: User) -> SnsAccount:
+    """전송 소스 approve 는 SNS 계정 필수(1차 리뷰 F-4) — 테스트용 활성 threads 계정."""
+    return await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="전송봇",
+        platform_username="our_bot",
     )
 
 
@@ -205,21 +216,27 @@ async def test_ignore_transitions(reviewer_session):
 
 
 async def test_approve_send_success_and_failure_then_retry(reviewer_session, monkeypatch):
-    """can_write=True: 실패 → 502 + failed 회계 + reviewing 복귀 → retry → sent."""
+    """can_write=True: 확정 실패 → 502 + failed 회계 + reviewing 복귀 → retry → sent."""
     client, csrf, user = reviewer_session
     adapter = FakeWriteAdapter(fail=True)
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
     match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
+    body = {"final_body": "본문", "sns_account_id": account.id}
     try:
-        # retry 는 reviewing 전용 — new 상태에서는 409
-        r = await client.post(
-            f"/api/matches/{match.id}/retry", json={"final_body": "본문"}, headers=csrf
-        )
-        assert r.status_code == 409
-
+        # 전송 소스는 SNS 계정 필수 — 계정 없이 approve 는 클레임 전 422 (1차 리뷰 F-4)
         r = await client.post(
             f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
         )
+        assert r.status_code == 422
+        await match.refresh_from_db()
+        assert match.status == PostStatus.new  # 상태 안 건드림
+
+        # retry 는 reviewing 전용 — new 상태에서는 409
+        r = await client.post(f"/api/matches/{match.id}/retry", json=body, headers=csrf)
+        assert r.status_code == 409
+
+        r = await client.post(f"/api/matches/{match.id}/approve", json=body, headers=csrf)
         assert r.status_code == 502
         assert r.json() == {"action": "failed", "detail": "답변 전송에 실패했습니다 — 재시도할 수 있습니다"}
         await match.refresh_from_db()
@@ -228,9 +245,7 @@ async def test_approve_send_success_and_failure_then_retry(reviewer_session, mon
         assert len(failed) == 1 and "mock 전송 실패" in failed[0].error
 
         adapter.fail = False
-        r = await client.post(
-            f"/api/matches/{match.id}/retry", json={"final_body": "본문"}, headers=csrf
-        )
+        r = await client.post(f"/api/matches/{match.id}/retry", json=body, headers=csrf)
         assert r.status_code == 200
         out = r.json()
         assert out["action"] == "sent" and out["external_reply_id"].startswith("mock-reply-")
@@ -240,6 +255,7 @@ async def test_approve_send_success_and_failure_then_retry(reviewer_session, mon
         assert actions == [ReplyAction.failed, ReplyAction.sent]  # append-only 이력
     finally:
         await _cleanup(match)
+        await account.delete()
 
 
 async def test_concurrent_approve_exactly_one_sent(reviewer_session, monkeypatch):
@@ -248,10 +264,17 @@ async def test_concurrent_approve_exactly_one_sent(reviewer_session, monkeypatch
     adapter = FakeWriteAdapter(delay=0.3)  # 전송 지연으로 두 요청의 시간창을 겹치게 한다
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
     match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
     try:
         r1, r2 = await asyncio.gather(
-            client.post(f"/api/matches/{match.id}/approve", json={"final_body": "a"}, headers=csrf),
-            client.post(f"/api/matches/{match.id}/approve", json={"final_body": "b"}, headers=csrf),
+            client.post(
+                f"/api/matches/{match.id}/approve",
+                json={"final_body": "a", "sns_account_id": account.id}, headers=csrf,
+            ),
+            client.post(
+                f"/api/matches/{match.id}/approve",
+                json={"final_body": "b", "sns_account_id": account.id}, headers=csrf,
+            ),
         )
         assert sorted([r1.status_code, r2.status_code]) == [200, 409]
         assert adapter.send_calls == 1  # 전송 자체가 1회만 일어났다
@@ -261,6 +284,7 @@ async def test_concurrent_approve_exactly_one_sent(reviewer_session, monkeypatch
         assert match.status == PostStatus.replied
     finally:
         await _cleanup(match)
+        await account.delete()
 
 
 async def test_partial_unique_blocks_second_sent_row(reviewer_session):
@@ -285,47 +309,126 @@ async def test_partial_unique_blocks_second_sent_row(reviewer_session):
         await _cleanup(match)
 
 
-async def test_sweep_recovers_stuck_sending(reviewer_session):
-    """MUST-FIX #4: 고착 sending 만 reviewing 으로 회수, 최근 클레임은 보존."""
+async def test_sweep_branches_by_verify_meta(reviewer_session):
+    """MUST-FIX #4 + M2 조정 설계 §3.3: 고착 sending 회수 분기 — 전송 착수분
+    (verify_meta 有)은 verify_pending(결과 불명), 착수 전 잔재는 reviewing. 최근 클레임 보존."""
     client, csrf, user = reviewer_session
-    stuck = await _make_match(user)
+    stuck_safe = await _make_match(user)      # 전송 착수 전 크래시 잔재
+    stuck_unknown = await _make_match(user)   # 전송 착수 후 크래시 잔재
     fresh = await _make_match(user)
     try:
         old = datetime.now(UTC) - timedelta(seconds=reply.SENDING_STALE_SEC + 60)
-        await MatchedPost.filter(id=stuck.id).update(
+        await MatchedPost.filter(id=stuck_safe.id).update(
             status=PostStatus.sending, sending_claimed_at=old
+        )
+        await MatchedPost.filter(id=stuck_unknown.id).update(
+            status=PostStatus.sending, sending_claimed_at=old,
+            verify_meta={"target_media_id": "m1", "claim_ts": old.isoformat(),
+                         "attempts": 0, "reviewer_id": user.id, "final_body": "본문",
+                         "sns_account_id": None},
         )
         await MatchedPost.filter(id=fresh.id).update(
             status=PostStatus.sending, sending_claimed_at=datetime.now(UTC)
         )
-        assert await reply.sweep_stuck_sending() == 1
-        await stuck.refresh_from_db()
+        assert await reply.sweep_stuck_sending() == 2
+        await stuck_safe.refresh_from_db()
+        await stuck_unknown.refresh_from_db()
         await fresh.refresh_from_db()
-        assert stuck.status == PostStatus.reviewing
+        assert stuck_safe.status == PostStatus.reviewing
+        assert stuck_unknown.status == PostStatus.verify_pending  # 이중 게시 창 차단
         assert fresh.status == PostStatus.sending
     finally:
-        await _cleanup(stuck)
+        await _cleanup(stuck_safe)
+        await _cleanup(stuck_unknown)
         await _cleanup(fresh)
 
 
-async def test_send_timeout_forces_failed(reviewer_session, monkeypatch):
-    """send_reply 가 상한을 넘기면 강제 취소 → failed 회계 + reviewing 복귀 (1차 리뷰 C2)."""
+async def test_send_timeout_goes_verify_pending(reviewer_session, monkeypatch):
+    """send_reply 타임아웃 = 결과 불명(M2 조정 설계 §3.2 — 취소는 외부 사이드이펙트를
+    중단시키지 않는다): unknown 회계 + verify_pending 전이, retry 는 열리지 않는다."""
     client, csrf, user = reviewer_session
     adapter = FakeWriteAdapter(delay=5.0)
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
     monkeypatch.setattr(reply, "SEND_TIMEOUT_SEC", 0.1)
     match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
     try:
         r = await client.post(
-            f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
+            f"/api/matches/{match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": account.id}, headers=csrf,
         )
         assert r.status_code == 502
+        assert r.json()["action"] == "unknown"
         await match.refresh_from_db()
-        assert match.status == PostStatus.reviewing
-        failed = await ReplyActionLog.filter(matched_post_id=match.id, action=ReplyAction.failed)
-        assert len(failed) == 1 and "타임아웃" in failed[0].error
+        assert match.status == PostStatus.verify_pending
+        logs = await ReplyActionLog.filter(matched_post_id=match.id, action=ReplyAction.unknown)
+        assert len(logs) == 1 and "타임아웃" in logs[0].error
+        # 조정 재료가 남아 있어야 조정 잡이 판정할 수 있다
+        assert match.verify_meta["target_media_id"] == match.external_post_id
+        assert match.verify_meta["reviewer_id"] == user.id
+        assert match.verify_meta["final_body"] == "본문"
+        assert match.verify_meta["sns_account_id"] == account.id
     finally:
         await _cleanup(match)
+        await account.delete()
+
+
+async def test_unknown_outcome_gates_and_ignore_escape(reviewer_session, monkeypatch):
+    """SendOutcomeUnknown → verify_pending: approve/retry 는 409(재전송 구조 차단),
+    ignore 만 허용(탈출구) + verify_meta 청소 (M2 조정 설계 §3.1)."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter(unknown=True)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
+    body = {"final_body": "본문", "sns_account_id": account.id}
+    try:
+        r = await client.post(f"/api/matches/{match.id}/approve", json=body, headers=csrf)
+        assert r.status_code == 502
+        assert r.json() == {
+            "action": "unknown",
+            "detail": "전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다",
+        }
+        await match.refresh_from_db()
+        assert match.status == PostStatus.verify_pending
+        assert match.verify_meta["container_id"] == "mock-container-1"
+
+        # 결과 불명 상태에서 재전송 경로는 구조적으로 닫혀 있다(CAS 클레임 대상 아님)
+        for path in ("approve", "retry"):
+            r = await client.post(f"/api/matches/{match.id}/{path}", json=body, headers=csrf)
+            assert r.status_code == 409, path
+        assert adapter.send_calls == 1  # 전송은 1회뿐
+
+        # ignore 는 허용 — 사람의 탈출구. verify_meta 도 청소된다.
+        r = await client.post(f"/api/matches/{match.id}/ignore", headers=csrf)
+        assert r.status_code == 200
+        await match.refresh_from_db()
+        assert match.status == PostStatus.ignored
+        assert match.verify_meta is None
+    finally:
+        await _cleanup(match)
+        await account.delete()
+
+
+async def test_definite_failure_clears_verify_meta(reviewer_session, monkeypatch):
+    """확정 실패(SendError)는 기존대로 reviewing 복귀 + retry 개방, 조정 재료는 청소."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter(fail=True)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
+    try:
+        r = await client.post(
+            f"/api/matches/{match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": account.id}, headers=csrf,
+        )
+        assert r.status_code == 502 and r.json()["action"] == "failed"
+        await match.refresh_from_db()
+        assert match.status == PostStatus.reviewing
+        assert match.verify_meta is None
+    finally:
+        await _cleanup(match)
+        await account.delete()
 
 
 async def test_zombie_approve_does_not_override_ignore(reviewer_session, monkeypatch):
@@ -335,10 +438,12 @@ async def test_zombie_approve_does_not_override_ignore(reviewer_session, monkeyp
     adapter = FakeWriteAdapter(delay=0.5)
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
     match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
     try:
         approve_task = asyncio.create_task(
             client.post(
-                f"/api/matches/{match.id}/approve", json={"final_body": "본문"}, headers=csrf
+                f"/api/matches/{match.id}/approve",
+                json={"final_body": "본문", "sns_account_id": account.id}, headers=csrf,
             )
         )
         await asyncio.sleep(0.2)  # 클레임(sending) 이후, 전송 완료 전
@@ -360,6 +465,7 @@ async def test_zombie_approve_does_not_override_ignore(reviewer_session, monkeyp
         assert actions == {ReplyAction.canceled, ReplyAction.sent}  # 전송 사실은 기록 유지
     finally:
         await _cleanup(match)
+        await account.delete()
 
 
 async def test_zombie_does_not_override_active_reclaim(reviewer_session, monkeypatch):
@@ -370,10 +476,12 @@ async def test_zombie_does_not_override_active_reclaim(reviewer_session, monkeyp
     adapter = FakeWriteAdapter(delay=1.0)
     monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
     match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)
     try:
         zombie = asyncio.create_task(
             client.post(
-                f"/api/matches/{match.id}/approve", json={"final_body": "T1"}, headers=csrf
+                f"/api/matches/{match.id}/approve",
+                json={"final_body": "T1", "sns_account_id": account.id}, headers=csrf,
             )
         )
         await asyncio.sleep(0.3)  # T1 클레임 후, 전송 완료 전
@@ -384,7 +492,8 @@ async def test_zombie_does_not_override_active_reclaim(reviewer_session, monkeyp
         adapter.delay = 1.5
         reclaim = asyncio.create_task(
             client.post(
-                f"/api/matches/{match.id}/retry", json={"final_body": "T2"}, headers=csrf
+                f"/api/matches/{match.id}/retry",
+                json={"final_body": "T2", "sns_account_id": account.id}, headers=csrf,
             )
         )
         await asyncio.sleep(0.2)
@@ -406,6 +515,7 @@ async def test_zombie_does_not_override_active_reclaim(reviewer_session, monkeyp
         assert len(sent) == 1  # DB 는 끝까지 sent 1건만 허용(불변식 ②)
     finally:
         await _cleanup(match)
+        await account.delete()
 
 
 def test_uvicorn_single_worker_config():
