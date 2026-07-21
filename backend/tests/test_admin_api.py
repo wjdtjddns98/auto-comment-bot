@@ -384,10 +384,34 @@ async def test_sns_account_without_key_503(admin_session, monkeypatch):
     monkeypatch.setattr(settings, "credentials_fernet_keys", "")
     r = await client.post(
         "/api/sns-accounts",
-        json={"platform": "threads", "display_name": "x", "credentials": {"t": "v"}},
+        json={"platform": "threads", "display_name": "x", "credentials": {"access_token": "v"}},
         headers=csrf,
     )
     assert r.status_code == 503
+
+
+async def test_sns_account_threads_requires_access_token(admin_session, monkeypatch):
+    """threads 자격증명 형식은 등록 시점 422 — 아무 JSON 이나 저장돼 폴링 때에야
+    실패가 드러나는 상태 방지. 에러 detail 에 입력값 echo 없음(불변식 ③)."""
+    client, csrf = admin_session
+    monkeypatch.setattr(settings, "credentials_fernet_keys", Fernet.generate_key().decode())
+    for bad in ({}, {"t": "v"}, {"access_token": ""}, {"access_token": "   "},
+                {"access_token": 123}):
+        r = await client.post(
+            "/api/sns-accounts",
+            json={"platform": "threads", "display_name": "x", "credentials": bad},
+            headers=csrf,
+        )
+        assert r.status_code == 422, bad
+        assert "access_token" in r.json()["detail"]
+    # naver 등 스키마 미확정 플랫폼은 종전대로 자유 형식 허용
+    r = await client.post(
+        "/api/sns-accounts",
+        json={"platform": "naver", "display_name": "n", "credentials": {"t": "v"}},
+        headers=csrf,
+    )
+    assert r.status_code == 201
+    await client.delete(f"/api/sns-accounts/{r.json()['id']}", headers=csrf)
 
 
 # sns-accounts 는 셀프서비스(로그인 사용자 전체 허용)라 admin 전용 목록에서 제외
@@ -428,7 +452,8 @@ async def test_sns_account_self_service_ownership(api_client, monkeypatch):
         csrf = await _login(owner)
         r = await api_client.post(
             "/api/sns-accounts",
-            json={"platform": "threads", "display_name": "내계정", "credentials": {"t": "v"}},
+            json={"platform": "threads", "display_name": "내계정",
+                  "credentials": {"access_token": "v"}},
             headers=csrf,
         )
         assert r.status_code == 201 and r.json()["user_id"] == owner.id

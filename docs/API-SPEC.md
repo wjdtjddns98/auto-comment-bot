@@ -90,6 +90,9 @@ Req `{ pattern, match_type: "substring|regex", source_scope?: int|null }` → 20
 Req `{ platform, display_name, credentials: {...} }` → 201 `{ id, user_id, platform, display_name, status, token_expires_at }`.
 → `credentials`는 서버가 즉시 Fernet 암호화해 `sns_account_secrets`에 저장. 응답에 재노출 안 함.
 → 생성 주체에게 자동 귀속(타인 명의 등록 불가).
+→ **플랫폼별 형식 검증(등록 시점 422)**: `threads` 는 `credentials.access_token`(비어 있지 않은
+  문자열) 필수 — 누락/오형식이면 `422 { detail: "credentials.access_token: ..." }`(입력값 echo 없음).
+  FE 는 threads 선택 시 토큰 입력칸 하나만 노출하고 `{"access_token": <값>}` 으로 조립 권장(#32).
 
 ### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
 
