@@ -24,7 +24,7 @@ export const MOCK_SOURCES: Source[] = [
   {
     id: 1,
     type: "threads",
-    config: { keyword_scope: "public" },
+    config: { query: "강아지 간식", sns_account_id: 1 },
     poll_interval_sec: 300,
     enabled: true,
     last_success_at: "2026-07-19T09:00:00Z",
