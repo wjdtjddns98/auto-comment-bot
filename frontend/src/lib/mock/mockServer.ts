@@ -62,8 +62,6 @@ const templates = structuredClone(MOCK_TEMPLATES);
 const snsAccounts = structuredClone(MOCK_SNS_ACCOUNTS);
 const matchedPosts = structuredClone(MOCK_MATCHED_POSTS);
 const replyActions = structuredClone(MOCK_REPLY_ACTIONS);
-// retry(재시도)가 마지막 approve 시도 내용을 재사용할 수 있도록 보관.
-const lastApproveRequestByMatchId = new Map<number, ApproveMatchRequest>();
 
 function nextId(records: Array<{ id: number }>): number {
   return records.reduce((max, r) => Math.max(max, r.id), 0) + 1;
@@ -177,7 +175,6 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
   if (!req.final_body) throw new MockApiError(422, "final_body는 필수입니다.");
 
   match.status = "sending";
-  lastApproveRequestByMatchId.set(id, req);
   const templateId = req.template_id ?? null;
 
   if (canWrite(match.source_id)) {
@@ -202,19 +199,22 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
 }
 
 function handleIgnore(id: number): void {
-  requireUser();
+  const user = requireUser();
   const match = findMatchOr404(id);
+  if (match.status !== "new" && match.status !== "reviewing") {
+    throw new MockApiError(409, "이미 처리 중이거나 완료된 매칭입니다.");
+  }
   match.status = "ignored";
+  recordReplyAction(id, user.id, "canceled", null, null, null);
 }
 
-function handleRetry(id: number): ApproveMatchResponse {
+// 실서버는 이전 시도 본문을 재사용하지 않는다 — retry 요청 바디는 approve 와 동일하게 필수.
+function handleRetry(id: number, body: unknown): ApproveMatchResponse {
   const match = findMatchOr404(id);
   if (match.status !== "reviewing") {
     throw new MockApiError(409, "재시도는 reviewing 상태에서만 가능합니다.");
   }
-  const previous = lastApproveRequestByMatchId.get(id);
-  if (!previous) throw new MockApiError(404, "이전 승인 시도 기록이 없습니다.");
-  return handleApprove(id, previous);
+  return handleApprove(id, body);
 }
 
 // ---- 소스 (admin) ----
@@ -428,7 +428,7 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
   {
     method: "POST",
     pattern: /^\/api\/matches\/(?<id>\d+)\/retry$/,
-    handler: (p) => handleRetry(Number(p.id)),
+    handler: (p, _q, body) => handleRetry(Number(p.id), body),
   },
 
   { method: "GET", pattern: /^\/api\/sources$/, handler: () => handleGetSources() },

@@ -137,7 +137,7 @@ export interface MatchDetail extends MatchedPost {
   reply_actions: Array<Omit<ReplyAction, "matched_post_id">>;
 }
 
-export type ReplyActionType = "approved" | "sent" | "failed";
+export type ReplyActionType = "approved" | "sent" | "failed" | "canceled";
 
 export interface ReplyAction {
   id: number;

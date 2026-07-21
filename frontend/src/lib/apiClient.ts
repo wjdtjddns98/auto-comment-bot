@@ -155,8 +155,9 @@ export const approveMatch = (id: number, body: ApproveMatchRequest) =>
   request<ApproveMatchResponse>(`/api/matches/${id}/approve`, { method: "POST", body });
 export const ignoreMatch = (id: number) =>
   request<void>(`/api/matches/${id}/ignore`, { method: "POST" });
-export const retryMatch = (id: number) =>
-  request<ApproveMatchResponse>(`/api/matches/${id}/retry`, { method: "POST" });
+// retry 는 body 없이 이전 시도를 재사용하지 않는다 — approve 와 동일한 요청 바디(final_body 필수)가 필요하다.
+export const retryMatch = (id: number, body: ApproveMatchRequest) =>
+  request<ApproveMatchResponse>(`/api/matches/${id}/retry`, { method: "POST", body });
 
 // --- 관리 (admin) ---
 export const getSources = () => request<Source[]>("/api/sources");
