@@ -19,6 +19,7 @@ import { Field, Select, Textarea } from "../components/ui/Input";
 import {
   formatDateTime,
   isWritableSourceType,
+  RECONCILED_UNPUBLISHED_ERROR,
   SOURCE_TYPE_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
@@ -29,6 +30,7 @@ const REPLY_ACTION_LABEL: Record<string, string> = {
   sent: "전송 성공",
   failed: "전송 실패",
   canceled: "무시(취소)",
+  unknown: "결과 불명(조정 대기)",
 };
 
 function describeError(error: unknown): string {
@@ -135,7 +137,11 @@ export default function MatchDetailPage() {
 
   const match = matchQuery.data;
   const actionable = match.status === "new" || match.status === "reviewing";
+  const verifyPending = match.status === "verify_pending";
   const canRetry = match.status === "reviewing" && match.reply_actions.some((a) => a.action === "failed");
+  const unpublishedHint =
+    canRetry && match.reply_actions.some((a) => a.action === "failed" && a.error === RECONCILED_UNPUBLISHED_ERROR);
+  const writableAccountMissing = writable && snsAccountId === "";
 
   return (
     <section className="flex flex-col gap-6">
@@ -192,12 +198,12 @@ export default function MatchDetailPage() {
           </Field>
 
           {writable ? (
-            <Field label="SNS 계정">
+            <Field label="SNS 계정 (필수)">
               <Select
                 value={snsAccountId}
                 onChange={(e) => setSnsAccountId(e.target.value === "" ? "" : Number(e.target.value))}
               >
-                <option value="">기본 계정</option>
+                <option value="">계정 선택</option>
                 {(snsAccounts ?? [])
                   .filter((a) => a.platform === source?.type)
                   .map((a) => (
@@ -206,6 +212,9 @@ export default function MatchDetailPage() {
                     </option>
                   ))}
               </Select>
+              {writableAccountMissing && (
+                <p className="text-xs text-tone-danger">전송 가능한 소스는 SNS 계정 선택이 필수입니다.</p>
+              )}
             </Field>
           ) : (
             <p className="text-xs text-gray-500">
@@ -214,11 +223,18 @@ export default function MatchDetailPage() {
           )}
 
           <div className="flex items-center gap-2">
-            <Button onClick={() => approveMutation.mutate()} disabled={!finalBody.trim() || approveMutation.isPending}>
+            <Button
+              onClick={() => approveMutation.mutate()}
+              disabled={!finalBody.trim() || writableAccountMissing || approveMutation.isPending}
+            >
               {approveMutation.isPending ? "처리 중…" : "승인"}
             </Button>
             {canRetry && (
-              <Button variant="secondary" onClick={() => retryMutation.mutate()} disabled={retryMutation.isPending}>
+              <Button
+                variant="secondary"
+                onClick={() => retryMutation.mutate()}
+                disabled={writableAccountMissing || retryMutation.isPending}
+              >
                 재시도
               </Button>
             )}
@@ -226,6 +242,12 @@ export default function MatchDetailPage() {
               무시
             </Button>
           </div>
+
+          {unpublishedHint && (
+            <p className="text-xs text-tone-warning">
+              조정 결과 미게시로 판정되었습니다 — 재시도 전 대상 글에서 직접 게시 여부를 확인해 주세요.
+            </p>
+          )}
 
           {actionError && <p className="text-sm text-tone-danger">{actionError}</p>}
 
@@ -240,6 +262,19 @@ export default function MatchDetailPage() {
               </Button>
             </div>
           )}
+        </Card>
+      ) : verifyPending ? (
+        <Card className="flex flex-col gap-3">
+          <p className="text-sm text-gray-500">
+            전송 결과를 확인할 수 없어 자동 조정 대기 중입니다. 조정이 끝나면 답변완료 또는 검토중으로
+            자동 전환됩니다. 조정이 오래 걸리면 무시로 종료할 수 있습니다.
+          </p>
+          <div>
+            <Button variant="danger" onClick={() => ignoreMutation.mutate()} disabled={ignoreMutation.isPending}>
+              무시
+            </Button>
+          </div>
+          {actionError && <p className="text-sm text-tone-danger">{actionError}</p>}
         </Card>
       ) : (
         <Card className="text-sm text-gray-500">이미 처리 완료된 매칭입니다 ({STATUS_LABEL[match.status]}).</Card>

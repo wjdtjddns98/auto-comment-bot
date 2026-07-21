@@ -109,7 +109,9 @@ export type MatchedPostStatus =
   | "reviewing"
   | "sending"
   | "replied"
-  | "ignored";
+  | "ignored"
+  // 전송 결과 불명 — 자동 조정 대기. 재전송 차단, ignore 만 가능(docs/M2-SEND-RECONCILIATION.md).
+  | "verify_pending";
 
 export interface MatchedPost {
   id: number;
@@ -137,7 +139,7 @@ export interface MatchDetail extends MatchedPost {
   reply_actions: Array<Omit<ReplyAction, "matched_post_id">>;
 }
 
-export type ReplyActionType = "approved" | "sent" | "failed" | "canceled";
+export type ReplyActionType = "approved" | "sent" | "failed" | "canceled" | "unknown";
 
 export interface ReplyAction {
   id: number;

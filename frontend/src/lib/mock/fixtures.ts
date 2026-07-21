@@ -155,6 +155,19 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     matched_at: "2026-07-20T08:00:00Z",
     status: "new",
   },
+  {
+    id: 6,
+    source_id: 1,
+    external_post_id: "th_1003",
+    author: "user_ghi",
+    url: "https://www.threads.net/@user_ghi/post/1003",
+    content: "강아지 간식 계산기 써봤는데 결과가 정확한지 궁금해요",
+    matched_keyword_id: 1,
+    published_at: "2026-07-20T12:00:00Z",
+    matched_at: "2026-07-20T12:05:00Z",
+    // 전송 결과 불명 — 자동 조정 대기(M2). 읽기 전용 뱃지 + ignore 만 활성 화면 재현용.
+    status: "verify_pending",
+  },
 ];
 
 export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
@@ -167,5 +180,26 @@ export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
     external_reply_id: null,
     error: null,
     created_at: "2026-07-18T09:20:00Z",
+  },
+  {
+    id: 2,
+    matched_post_id: 2,
+    reviewer_user_id: 2,
+    action: "failed",
+    template_id: null,
+    external_reply_id: null,
+    // 조정 잡의 미게시 판정 이력(backend/app/reconcile.py) — retry 버튼 옆 권장 문구 재현용.
+    error: "조정 완료 — 미게시 판정. 재시도 전 대상 글에서 직접 확인을 권장합니다",
+    created_at: "2026-07-19T11:30:00Z",
+  },
+  {
+    id: 3,
+    matched_post_id: 6,
+    reviewer_user_id: 2,
+    action: "unknown",
+    template_id: 1,
+    external_reply_id: null,
+    error: "전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다",
+    created_at: "2026-07-20T12:06:00Z",
   },
 ];
