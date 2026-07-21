@@ -8,8 +8,11 @@ approve 처리 중 프로세스가 죽으면 매칭이 sending 에 고착돼 영
   sweep 이 "아직 살아있는 전송"을 회수하는 일이 없다(회수 대상은 죽은 클레임뿐).
 - 상태 갱신은 클레임 시각(sending_claimed_at) 펜싱으로 조건부 실행 — 회수 후 다른
   사람이 바꾼 상태(ignored 등)를 좀비 요청이 덮어쓰지 못한다.
-- 잔여 창: "전송 성공 후 sent 기록 전 크래시"는 여전히 재시도 시 이중 발송 가능.
-  근본 해결은 제공자 idempotency-key(FR-14, OQ-1)로 M2 에서 다룬다.
+- 회수 분기(M2 조정 설계 §3.3 — OQ-1 닫힘: idempotency-key 미지원): 전송에 착수한
+  잔재(verify_meta 있음)는 결과 불명이므로 reviewing 이 아니라 verify_pending 으로
+  보내 조정 잡이 실제 게시 여부를 확인한 뒤에만 retry 를 연다. 착수 전 잔재
+  (verify_meta 없음, can_write=False 소스 포함)만 reviewing 복귀 — "전송 성공 후
+  sent 기록 전 크래시 → 즉시 retry → 이중 발송" 창이 이 분기로 닫힌다.
 """
 import logging
 from datetime import UTC, datetime, timedelta
@@ -34,14 +37,21 @@ def _stuck_q(cutoff: datetime):
 
 
 async def sweep_stuck_sending() -> int:
-    """고착 sending → reviewing 회수. 회수한 행 수를 반환(스케줄러 주기 실행)."""
+    """고착 sending 회수 — 전송 착수분(verify_meta 有)은 verify_pending, 그 외는
+    reviewing. 회수한 행 수를 반환(스케줄러 주기 실행)."""
     cutoff = datetime.now(UTC) - timedelta(seconds=SENDING_STALE_SEC)
     ids = list(await MatchedPost.filter(_stuck_q(cutoff)).values_list("id", flat=True))
     if not ids:
         return 0
-    n = await MatchedPost.filter(_stuck_q(cutoff), id__in=ids).update(
-        status=PostStatus.reviewing
-    )
+    unknown = await MatchedPost.filter(
+        _stuck_q(cutoff), id__in=ids, verify_meta__isnull=False
+    ).update(status=PostStatus.verify_pending)
+    safe = await MatchedPost.filter(
+        _stuck_q(cutoff), id__in=ids, verify_meta__isnull=True
+    ).update(status=PostStatus.reviewing)
     # 사후 추적용 — SELECT~UPDATE 사이 상태가 바뀐 행은 제외되므로 ids 는 후보 목록이다
-    logger.warning("sending 고착 회수 %d/%d건 → reviewing 후보 ids=%s", n, len(ids), ids)
-    return n
+    logger.warning(
+        "sending 고착 회수 %d건(→verify_pending %d, →reviewing %d) 후보 ids=%s",
+        unknown + safe, unknown, safe, ids,
+    )
+    return unknown + safe

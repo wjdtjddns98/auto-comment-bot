@@ -72,8 +72,10 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 - **FR-11** 선점 성공 후 어댑터로 전송하고, 결과를 `reply_actions`에 기록: 성공 `sent`(+external_reply_id), 실패 `failed`(+error).
 - **FR-12** `reply_actions`는 matched_post당 `action='sent'` 최대 1건을 **DB partial unique index**로 강제한다. *(MUST-FIX #1)*
 - **FR-13** 전송 실패는 **자동 재시도하지 않는다**(스팸 방지). reviewer의 수동 재시도만 허용, 재시도는 새 `reply_actions` 행.
-- **FR-14** `sending`에 정체된 행(프로세스 crash 등)은 `sending_claimed_at` 기준 N분 초과 시 reconciliation sweep이 `reviewing`으로 되돌린다(또는 수동 reset). 외부 전송 멱등성: idempotency-key 지원 시 사용, 불가 시 **at-most-once(타임아웃=미전송 처리)** 정책 명시. *(MUST-FIX #4)*
-  > ⚠️ OQ-1 닫힘(2026-07-21): idempotency-key **미지원** 확인 — 본 항목의 멱등성 분기·sweep 복귀 정책은 `docs/M2-SEND-RECONCILIATION.md` 의 unknown-outcome 조정 설계로 M2 에서 대체된다(체크리스트 R6 에서 본문 갱신 예정).
+- **FR-14** 전송 결과 불명(unknown outcome) 처리 — 상세 설계는 `docs/M2-SEND-RECONCILIATION.md`. *(MUST-FIX #4, OQ-1 닫힘 2026-07-21: Threads idempotency-key 미지원 확정)*
+  - 확정 실패(게시 안 됐음이 보장)만 `reviewing` 복귀로 retry 를 연다. publish 단계의 타임아웃/응답유실/**5xx**는 **결과 불명** → `verify_pending` 전이(재전송 구조 차단, ignore 만 허용).
+  - **조정(reconciliation) 잡**이 대상 글의 답글을 read-only 조회해 실제 게시 여부를 판정: 발견 → `sent` 회계+`replied`, 미발견 상한 도달 → 미게시 판정+`reviewing`(retry 재개, "직접 확인 권장" 안내).
+  - `sending` 정체 행(프로세스 crash 등)은 sweep 이 회수하되, 전송 착수분(verify_meta 有)은 `verify_pending` 으로 — 죽은 클레임도 결과 불명이다.
 - **FR-15** `can_write=False` 소스는 전송 대신 클립보드 복사 문구를 제공하고 `reply_actions`에 `approved`만 기록.
 
 ### 감사 & 관측 (Audit & Observability)
