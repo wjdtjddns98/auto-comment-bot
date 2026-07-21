@@ -42,7 +42,9 @@ Req `{ type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }`
 
 > `config` 는 **타입별 스키마로 검증**된다(등록·수정 시점 422, 미지의 키 불허):
 > - `community`: `{ "rss_url": "https://..." }` (http/https URL 필수)
-> - `threads` · `naver_cafe`: 어댑터 미구현 — 등록 자체가 422 (M2 예정)
+> - `threads` (M2): `{ "query": "검색어(1~100자)", "sns_account_id": int }` — 키워드 검색
+>   수집의 인증에 쓸 **본인 threads 계정** id. FE 소스 폼에 threads 타입 추가 필요([FE 공유]).
+> - `naver_cafe`: 어댑터 미구현 — 등록 자체가 422
 >
 > 검증 실패 시 `422 { detail: "소스 설정이 올바르지 않습니다 — config.<필드>: <사유>[; ...]" }`.
 > URL 은 표준형으로 정규화되어 저장·응답될 수 있다(예: `https://ex.am` → `https://ex.am/`).

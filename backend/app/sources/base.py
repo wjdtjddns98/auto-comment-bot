@@ -34,8 +34,9 @@ class SendError(Exception):
     approve 플로우가 failed 회계 + reviewing 복귀(retry 안전) 후 502 로 변환한다.
 
     분류 규칙(M2 조정 설계 §3.2 — 단계별 분류이지 "응답 수신 여부" 분류가 아니다):
-    컨테이너 생성 단계의 모든 실패, publish 단계의 401/403/429/400(요청 미수행 명확).
-    publish 단계의 5xx/408/409/타임아웃/커넥션 오류는 SendOutcomeUnknown 을 쓸 것.
+    컨테이너 생성 단계의 모든 실패, publish 단계의 401/403/429 및 400 중 유효성/OAuth
+    계열 provider code(요청 미수행 명확)만. publish 단계의 그 외 전부(5xx/408/409/
+    목록 밖 4xx/transient 400/타임아웃/커넥션 오류)는 SendOutcomeUnknown 을 쓸 것.
 
     계약: 메시지는 audit 테이블에 저장되고 GET /api/matches/{id} 응답으로 노출된다 —
     자격증명·요청 헤더·토큰을 절대 포함하지 말 것(불변식 ③). SendError 이외의 예외

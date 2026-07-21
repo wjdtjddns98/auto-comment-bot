@@ -10,10 +10,12 @@ from app.sources.base import (  # noqa: F401 - 편의 re-export
     SourceAdapter,
 )
 from app.sources.rss import RssAdapter
+from app.sources.threads import ThreadsAdapter
 
-# threads/naver_cafe 어댑터는 후속 PR (Threads API·네이버 검색 OpenAPI)
+# naver_cafe 어댑터는 후속 PR (네이버 검색 OpenAPI)
 _ADAPTERS: dict[SourceType, SourceAdapter] = {
     SourceType.community: RssAdapter(),
+    SourceType.threads: ThreadsAdapter(),
 }
 
 

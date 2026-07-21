@@ -66,9 +66,24 @@ async def test_sources_crud_roundtrip(admin_session):
 
 
 async def test_source_unsupported_type_422(admin_session):
-    # 어댑터 미구현 타입은 등록 자체를 거부 — "정상처럼 보이는데 수집 안 됨" 방지
+    # 어댑터 미구현 타입(naver_cafe)은 등록 자체를 거부 — "정상처럼 보이는데 수집 안 됨" 방지
     client, csrf = admin_session
+    r = await client.post("/api/sources", json={"type": "naver_cafe"}, headers=csrf)
+    assert r.status_code == 422
+
+
+async def test_source_threads_config_schema(admin_session):
+    """threads 소스(M2): config 는 query + sns_account_id 필수 — 등록 시점 422."""
+    client, csrf = admin_session
+    # config 누락 → 422 + 필드 경로 명시
     r = await client.post("/api/sources", json={"type": "threads"}, headers=csrf)
+    assert r.status_code == 422 and "config.query" in r.json()["detail"]
+    # 미지의 키 불허
+    r = await client.post(
+        "/api/sources",
+        json={"type": "threads", "config": {"query": "누띠", "sns_account_id": 1, "extra": 1}},
+        headers=csrf,
+    )
     assert r.status_code == 422
 
 
