@@ -29,11 +29,13 @@ import {
 export class MockApiError extends Error {
   status: number;
   detail: string;
+  action?: string;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, action?: string) {
     super(detail);
     this.status = status;
     this.detail = detail;
+    this.action = action;
   }
 }
 
@@ -178,6 +180,7 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
   const templateId = req.template_id ?? null;
 
   if (canWrite(match.source_id)) {
+    if (!req.sns_account_id) throw new MockApiError(422, "sns_account_id는 필수입니다.");
     // final_body에 "실패테스트"를 포함해 502/재시도 흐름을 재현해볼 수 있다.
     if (req.final_body.includes("실패테스트")) {
       match.status = "reviewing";
@@ -185,7 +188,16 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
         id, user.id, "failed", templateId, null,
         "모의 전송 실패 (final_body에 '실패테스트' 포함)"
       );
-      throw new MockApiError(502, "SNS 전송에 실패했습니다.");
+      throw new MockApiError(502, "SNS 전송에 실패했습니다.", "failed");
+    }
+    // final_body에 "불명테스트"를 포함해 전송 결과 불명(verify_pending) 조정 흐름을 재현해볼 수 있다.
+    if (req.final_body.includes("불명테스트")) {
+      match.status = "verify_pending";
+      recordReplyAction(
+        id, user.id, "unknown", templateId, null,
+        "모의 전송 결과 불명 (final_body에 '불명테스트' 포함)"
+      );
+      throw new MockApiError(502, "전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다", "unknown");
     }
     match.status = "replied";
     const externalReplyId = `mock-reply-${id}-${Date.now()}`;
@@ -201,7 +213,8 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
 function handleIgnore(id: number): void {
   const user = requireUser();
   const match = findMatchOr404(id);
-  if (match.status !== "new" && match.status !== "reviewing") {
+  // verify_pending 도 허용 — 조정 장기 실패 시 사람의 탈출구(docs/M2-SEND-RECONCILIATION.md §3.1).
+  if (match.status !== "new" && match.status !== "reviewing" && match.status !== "verify_pending") {
     throw new MockApiError(409, "이미 처리 중이거나 완료된 매칭입니다.");
   }
   match.status = "ignored";

@@ -7,6 +7,7 @@ export const STATUS_LABEL: Record<MatchedPostStatus, string> = {
   sending: "전송중",
   replied: "답변완료",
   ignored: "무시됨",
+  verify_pending: "전송결과 확인중",
 };
 
 export const STATUS_TONE: Record<MatchedPostStatus, BadgeTone> = {
@@ -15,7 +16,13 @@ export const STATUS_TONE: Record<MatchedPostStatus, BadgeTone> = {
   sending: "warning",
   replied: "success",
   ignored: "neutral",
+  verify_pending: "warning",
 };
+
+// 조정(reconcile) 잡이 미게시 판정 시 남기는 이력 문구(backend/app/reconcile.py) — 원문 그대로 매칭해
+// retry 버튼 옆 권장 문구를 노출하는 트리거로 쓴다.
+export const RECONCILED_UNPUBLISHED_ERROR =
+  "조정 완료 — 미게시 판정. 재시도 전 대상 글에서 직접 확인을 권장합니다";
 
 export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
   threads: "Threads",

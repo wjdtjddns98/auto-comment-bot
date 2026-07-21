@@ -32,6 +32,7 @@ const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }>
   { value: "new", label: "신규" },
   { value: "reviewing", label: "검토중" },
   { value: "sending", label: "전송중" },
+  { value: "verify_pending", label: "전송결과 확인중" },
   { value: "replied", label: "답변완료" },
   { value: "ignored", label: "무시됨" },
 ];

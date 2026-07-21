@@ -27,12 +27,15 @@ const MOCK_ENABLED = import.meta.env.VITE_USE_MOCK === "true";
 export class ApiError extends Error {
   status: number;
   detail: string;
+  // 502 응답의 action("failed"|"unknown") — 재시도 가능 여부 구분에 필요(docs/API-SPEC.md §매칭).
+  action?: string;
 
-  constructor(status: number, detail: string) {
+  constructor(status: number, detail: string, action?: string) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
+    this.action = action;
   }
 }
 
@@ -93,7 +96,7 @@ async function request<T>(
     try {
       return await mockRequest<T>(path, options);
     } catch (err) {
-      if (err instanceof MockApiError) throw new ApiError(err.status, err.detail);
+      if (err instanceof MockApiError) throw new ApiError(err.status, err.detail, err.action);
       throw err;
     }
   }
@@ -123,13 +126,15 @@ async function request<T>(
 
   if (!res.ok) {
     let detail = res.statusText;
+    let action: string | undefined;
     try {
-      const errBody = (await res.json()) as { detail?: string };
+      const errBody = (await res.json()) as { detail?: string; action?: string };
       if (errBody.detail) detail = errBody.detail;
+      action = errBody.action;
     } catch {
       // 응답 본문이 JSON이 아니면 statusText 유지
     }
-    throw new ApiError(res.status, detail);
+    throw new ApiError(res.status, detail, action);
   }
 
   if (res.status === 204) return undefined as T;
