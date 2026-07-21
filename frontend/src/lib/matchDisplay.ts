@@ -1,5 +1,5 @@
 import type { BadgeTone } from "../components/ui/Badge";
-import type { MatchedPostStatus, SourceType } from "../types/api";
+import type { MatchedPostStatus, Source, SourceType } from "../types/api";
 
 export const STATUS_LABEL: Record<MatchedPostStatus, string> = {
   new: "신규",
@@ -50,6 +50,14 @@ export function getThreadsQuery(config: Record<string, unknown>): string {
 export function getThreadsAccountId(config: Record<string, unknown>): number | "" {
   const value = config.sns_account_id;
   return typeof value === "number" ? value : "";
+}
+
+// 이슈 #35 — 소스 표시용 이름. 미설정 시 타입별 config 값(URL/검색어)으로 폴백.
+export function getSourceDisplayName(source: Source): string {
+  if (source.name) return source.name;
+  if (source.type === "threads") return getThreadsQuery(source.config) || `#${source.id}`;
+  if (source.type === "community") return getRssUrl(source.config) || `#${source.id}`;
+  return `#${source.id}`;
 }
 
 // Threads 플랫폼 실 상한(API 의 final_body 상한은 2000자지만 전송 시 500자 초과는 502 확정 실패) — 이슈 #30.

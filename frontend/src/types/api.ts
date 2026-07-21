@@ -25,6 +25,7 @@ export type SourceType = "threads" | "naver_cafe" | "community";
 
 export interface Source {
   id: number;
+  name: string | null;
   type: SourceType;
   config: Record<string, unknown>;
   poll_interval_sec: number;
@@ -35,12 +36,14 @@ export interface Source {
 }
 
 export interface CreateSourceRequest {
+  name?: string;
   type: SourceType;
   config: Record<string, unknown>;
   poll_interval_sec: number;
 }
 
 export interface PatchSourceRequest {
+  name?: string | null;
   enabled?: boolean;
   poll_interval_sec?: number;
   config?: Record<string, unknown>;

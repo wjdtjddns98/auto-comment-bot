@@ -23,6 +23,7 @@ export const MOCK_USERS: MockUserRecord[] = [
 export const MOCK_SOURCES: Source[] = [
   {
     id: 1,
+    name: null,
     type: "threads",
     config: { query: "강아지 간식", sns_account_id: 1 },
     poll_interval_sec: 300,
@@ -33,6 +34,7 @@ export const MOCK_SOURCES: Source[] = [
   },
   {
     id: 2,
+    name: "댕러버 카페",
     type: "naver_cafe",
     config: { cafe_id: "dogloveu" },
     poll_interval_sec: 600,
@@ -43,6 +45,7 @@ export const MOCK_SOURCES: Source[] = [
   },
   {
     id: 3,
+    name: null,
     type: "community",
     config: { rss_url: "https://example-petcommunity.com/board/feed.rss" },
     poll_interval_sec: 900,

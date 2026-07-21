@@ -18,9 +18,9 @@ import { Card } from "../components/ui/Card";
 import { Field, Select, Textarea } from "../components/ui/Input";
 import {
   formatDateTime,
+  getSourceDisplayName,
   isWritableSourceType,
   RECONCILED_UNPUBLISHED_ERROR,
-  SOURCE_TYPE_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
   THREADS_BODY_LIMIT,
@@ -160,7 +160,7 @@ export default function MatchDetailPage() {
 
       <Card className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-gray-500">
-          <span>소스: {source ? SOURCE_TYPE_LABEL[source.type] : `#${match.source_id}`}</span>
+          <span>소스: {source ? getSourceDisplayName(source) : `#${match.source_id}`}</span>
           <span>작성자: {match.author ?? "-"}</span>
           <span>게시일시: {formatDateTime(match.published_at)}</span>
           <span>매칭일시: {formatDateTime(match.matched_at)}</span>

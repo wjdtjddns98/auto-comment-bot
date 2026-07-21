@@ -10,8 +10,8 @@ import { Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 import {
   formatDateTime,
+  getSourceDisplayName,
   HEALTH_TONE,
-  SOURCE_TYPE_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
 } from "../lib/matchDisplay";
@@ -47,9 +47,7 @@ function SourceHealthBar() {
     <div className="flex flex-wrap gap-3">
       {sources.map((source) => (
         <Card key={source.id} className="flex items-center gap-3 px-4 py-2.5">
-          <span className="font-medium text-gray-900">
-            {SOURCE_TYPE_LABEL[source.type] ?? source.type}
-          </span>
+          <span className="font-medium text-gray-900">{getSourceDisplayName(source)}</span>
           <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>
             ● {source.health_status}
           </Badge>
@@ -132,7 +130,7 @@ export default function DashboardPage() {
             <option value="all">전체</option>
             {(sources ?? []).map((s) => (
               <option key={s.id} value={s.id}>
-                {SOURCE_TYPE_LABEL[s.type] ?? s.type} #{s.id}
+                {getSourceDisplayName(s)}
               </option>
             ))}
           </Select>
@@ -180,7 +178,7 @@ export default function DashboardPage() {
                     <Td>
                       <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
                     </Td>
-                    <Td>{source ? SOURCE_TYPE_LABEL[source.type] ?? source.type : `#${m.source_id}`}</Td>
+                    <Td>{source ? getSourceDisplayName(source) : `#${m.source_id}`}</Td>
                     <Td>{keyword?.pattern ?? "-"}</Td>
                     <Td className="max-w-sm truncate" title={m.content}>
                       {m.content}

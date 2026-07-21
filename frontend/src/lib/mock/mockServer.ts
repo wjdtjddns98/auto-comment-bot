@@ -239,11 +239,21 @@ function handleGetSources(): Source[] {
   return [...sources];
 }
 
+// 공백뿐인 값은 null 로 정규화(API-SPEC.md §소스).
+function normalizeSourceName(name: unknown): string | null {
+  if (typeof name !== "string") return null;
+  const trimmed = name.trim();
+  return trimmed || null;
+}
+
 function handleCreateSource(body: unknown): Source {
   requireUser();
-  const req = (body ?? {}) as Pick<Source, "type" | "config" | "poll_interval_sec">;
+  const req = (body ?? {}) as Pick<Source, "type" | "config" | "poll_interval_sec"> & {
+    name?: string | null;
+  };
   const record: Source = {
     id: nextId(sources),
+    name: normalizeSourceName(req.name),
     type: req.type,
     config: req.config ?? {},
     poll_interval_sec: req.poll_interval_sec ?? 300,
@@ -260,7 +270,12 @@ function handlePatchSource(id: number, body: unknown): Source {
   requireUser();
   const record = sources.find((s) => s.id === id);
   if (!record) throw new MockApiError(404, "소스를 찾을 수 없습니다.");
-  Object.assign(record, body ?? {});
+  const req = (body ?? {}) as { name?: string | null };
+  const patch = { ...(body as object) };
+  if ("name" in req) {
+    Object.assign(patch, { name: normalizeSourceName(req.name) });
+  }
+  Object.assign(record, patch);
   return record;
 }
 

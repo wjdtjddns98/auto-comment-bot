@@ -7,6 +7,7 @@ import {
   SOURCE_TYPE_LABEL,
   formatDateTime,
   getRssUrl,
+  getSourceDisplayName,
   getThreadsAccountId,
   getThreadsQuery,
   HEALTH_TONE,
@@ -24,6 +25,7 @@ function CreateSourceForm() {
   const queryClient = useQueryClient();
   const { data: snsAccounts } = useQuery({ queryKey: ["snsAccounts"], queryFn: getSnsAccounts });
   const [type, setType] = useState<SourceType>("community");
+  const [name, setName] = useState("");
   const [rssUrl, setRssUrl] = useState("");
   const [threadsQuery, setThreadsQuery] = useState("");
   const [threadsAccountId, setThreadsAccountId] = useState<number | "">("");
@@ -35,6 +37,7 @@ function CreateSourceForm() {
   const mutation = useMutation({
     mutationFn: createSource,
     onSuccess: () => {
+      setName("");
       setRssUrl("");
       setThreadsQuery("");
       setThreadsAccountId("");
@@ -46,6 +49,7 @@ function CreateSourceForm() {
 
   function handleSubmit() {
     if (!implemented) return;
+    const trimmedName = name.trim();
     if (type === "threads") {
       if (!threadsQuery.trim()) {
         setError("검색어를 입력하세요.");
@@ -56,6 +60,7 @@ function CreateSourceForm() {
         return;
       }
       mutation.mutate({
+        name: trimmedName || undefined,
         type,
         config: { query: threadsQuery.trim(), sns_account_id: threadsAccountId },
         poll_interval_sec: pollIntervalSec,
@@ -66,7 +71,12 @@ function CreateSourceForm() {
       setError("RSS URL을 입력하세요.");
       return;
     }
-    mutation.mutate({ type, config: { rss_url: rssUrl.trim() }, poll_interval_sec: pollIntervalSec });
+    mutation.mutate({
+      name: trimmedName || undefined,
+      type,
+      config: { rss_url: rssUrl.trim() },
+      poll_interval_sec: pollIntervalSec,
+    });
   }
 
   return (
@@ -82,6 +92,15 @@ function CreateSourceForm() {
               </option>
             ))}
           </Select>
+        </Field>
+        <Field label="이름(선택, ≤100자)">
+          <Input
+            type="text"
+            maxLength={100}
+            placeholder="예: 강아지 커뮤니티"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
         </Field>
         <Field label="폴링 주기(초, 최소 60)">
           <Input
@@ -141,6 +160,7 @@ function SourceRow({ source }: { source: Source }) {
   const queryClient = useQueryClient();
   const { data: snsAccounts } = useQuery({ queryKey: ["snsAccounts"], queryFn: getSnsAccounts });
   const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(source.name ?? "");
   const [pollIntervalSec, setPollIntervalSec] = useState(source.poll_interval_sec);
   const [rssUrl, setRssUrl] = useState(() => getRssUrl(source.config));
   const [threadsQuery, setThreadsQuery] = useState(() => getThreadsQuery(source.config));
@@ -173,7 +193,10 @@ function SourceRow({ source }: { source: Source }) {
   });
 
   function handleSave() {
-    const body: Parameters<typeof patchSource>[1] = { poll_interval_sec: pollIntervalSec };
+    const body: Parameters<typeof patchSource>[1] = {
+      poll_interval_sec: pollIntervalSec,
+      name: name.trim() || null,
+    };
     if (implemented) {
       if (isThreads) {
         if (!threadsQuery.trim()) {
@@ -200,6 +223,19 @@ function SourceRow({ source }: { source: Source }) {
     <>
       <Tr className="hover:bg-gray-50 align-top">
         <Td>{SOURCE_TYPE_LABEL[source.type] ?? source.type}</Td>
+        <Td className="max-w-xs">
+          {editing ? (
+            <Input
+              type="text"
+              maxLength={100}
+              placeholder="이름(선택)"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          ) : (
+            <span className="text-gray-900">{getSourceDisplayName(source)}</span>
+          )}
+        </Td>
         <Td className="max-w-xs">
           {editing && implemented && isThreads ? (
             <div className="flex flex-col gap-1">
@@ -297,7 +333,7 @@ function SourceRow({ source }: { source: Source }) {
       </Tr>
       {error && (
         <Tr>
-          <Td colSpan={7} className="text-sm text-tone-danger">
+          <Td colSpan={8} className="text-sm text-tone-danger">
             {error}
           </Td>
         </Tr>
@@ -326,6 +362,7 @@ export default function AdminSourcesPage() {
           <Thead>
             <Tr>
               <Th>타입</Th>
+              <Th>이름</Th>
               <Th>설정</Th>
               <Th>폴링 주기</Th>
               <Th>헬스</Th>
@@ -337,7 +374,7 @@ export default function AdminSourcesPage() {
           <Tbody>
             {sources.length === 0 && (
               <Tr>
-                <Td colSpan={7} className="py-8 text-center text-gray-400">
+                <Td colSpan={8} className="py-8 text-center text-gray-400">
                   등록된 소스가 없습니다.
                 </Td>
               </Tr>
