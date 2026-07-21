@@ -17,13 +17,16 @@ function CreateSnsAccountForm() {
   const queryClient = useQueryClient();
   const [platform, setPlatform] = useState<SnsPlatform>("threads");
   const [displayName, setDisplayName] = useState("");
+  const [accessToken, setAccessToken] = useState("");
   const [credentials, setCredentials] = useState("{}");
   const [error, setError] = useState<string | null>(null);
+  const isThreads = platform === "threads";
 
   const mutation = useMutation({
     mutationFn: createSnsAccount,
     onSuccess: () => {
       setDisplayName("");
+      setAccessToken("");
       setCredentials("{}");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["snsAccounts"] });
@@ -34,6 +37,18 @@ function CreateSnsAccountForm() {
   function handleSubmit() {
     if (!displayName.trim()) {
       setError("표시 이름을 입력하세요.");
+      return;
+    }
+    if (isThreads) {
+      if (!accessToken.trim()) {
+        setError("액세스 토큰을 입력하세요.");
+        return;
+      }
+      mutation.mutate({
+        platform,
+        display_name: displayName,
+        credentials: { access_token: accessToken.trim() },
+      });
       return;
     }
     let parsedCredentials: Record<string, unknown>;
@@ -67,9 +82,21 @@ function CreateSnsAccountForm() {
           />
         </Field>
       </div>
-      <Field label="자격증명 (JSON)">
-        <Textarea rows={3} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
-      </Field>
+      {isThreads ? (
+        <Field label="액세스 토큰">
+          <Input
+            type="password"
+            autoComplete="off"
+            placeholder="threads 액세스 토큰"
+            value={accessToken}
+            onChange={(e) => setAccessToken(e.target.value)}
+          />
+        </Field>
+      ) : (
+        <Field label="자격증명 (JSON)">
+          <Textarea rows={3} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+        </Field>
+      )}
       <p className="text-xs text-gray-500">
         저장 즉시 서버에서 암호화되어 별도 보관되며, 이후 어떤 응답에도 다시 노출되지 않습니다.
       </p>
