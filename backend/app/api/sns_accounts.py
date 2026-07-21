@@ -39,6 +39,20 @@ class SnsAccountIn(BaseModel):
     credentials: dict[str, Any]
 
 
+def _validate_credentials(platform: Platform, credentials: dict[str, Any]) -> None:
+    """플랫폼별 자격증명 형식 검증 — 등록 시점 422. 아무 JSON 이나 저장돼서 폴링/전송
+    때에야 실패가 드러나는 상태 방지(소스 config 검증 #19 와 같은 원칙).
+    주의: detail 에 입력값을 절대 echo 하지 않는다(불변식 ③)."""
+    if platform == Platform.threads:
+        token = credentials.get("access_token")
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="credentials.access_token: threads 계정은 액세스 토큰(문자열)이 필요합니다",
+            )
+    # naver/community: 어댑터 미구현 — 스키마 확정 시(M3) 여기에 추가한다.
+
+
 def _out(a: SnsAccount) -> SnsAccountOut:
     return SnsAccountOut(
         id=a.id, user_id=a.user_id, platform=a.platform, display_name=a.display_name,
@@ -61,6 +75,7 @@ async def list_accounts(user: Annotated[User, Depends(current_user)]) -> list[Sn
 async def create_account(
     body: SnsAccountIn, user: Annotated[User, Depends(current_user)]
 ) -> SnsAccountOut:
+    _validate_credentials(body.platform, body.credentials)
     try:
         ciphertext = crypto.encrypt_credentials(body.credentials)
     except (RuntimeError, ValueError) as exc:
