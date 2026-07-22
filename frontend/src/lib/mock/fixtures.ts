@@ -187,6 +187,20 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     // 기준 "Threads 실발송→external_reply_id 기록", #28 조정 조회 흐름 최종 확인용).
     status: "replied",
   },
+  {
+    id: 8,
+    source_id: 2,
+    external_post_id: "nc_2003",
+    author: "cafe_user_3",
+    url: "https://cafe.naver.com/example/2003",
+    // 네이버 카페(can_write=false) + status=new 재현용 — 승인→클립보드 복사 플로우
+    // (MatchDetailPage handleCopy)를 mock 환경에서 확인할 유일한 naver_cafe 케이스.
+    content: "강아지 간식 급여량 계산기 써보신 분 계신가요, 초보라 감이 안 잡히네요",
+    matched_keyword_id: 1,
+    published_at: "2026-07-21T10:00:00Z",
+    matched_at: "2026-07-21T10:05:00Z",
+    status: "new",
+  },
 ];
 
 export const MOCK_REPLY_ACTIONS: ReplyAction[] = [

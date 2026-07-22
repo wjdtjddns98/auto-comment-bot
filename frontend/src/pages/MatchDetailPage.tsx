@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -16,6 +16,7 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field, Select, Textarea } from "../components/ui/Input";
+import { Toast, type ToastTone } from "../components/ui/Toast";
 import {
   formatDateTime,
   getSourceDisplayName,
@@ -56,6 +57,27 @@ export default function MatchDetailPage() {
   const [lastResult, setLastResult] = useState<ApproveMatchResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copyDone, setCopyDone] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
+  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  function showToast(message: string, tone: ToastTone) {
+    if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
+    setToast({ message, tone });
+    toastTimeoutRef.current = setTimeout(() => setToast(null), 3000);
+  }
+
+  // 승인 응답이 온 시점엔 클릭의 user-activation 이 만료돼 있을 수 있어(비동기 approve 요청 이후라서)
+  // 일부 브라우저(Safari 등)에서 clipboard 쓰기가 조용히 거부될 수 있다 — 실패해도 아래 수동 복사
+  // 버튼은 그대로 남겨두고 토스트로만 알린다.
+  async function autoCopy(body: string) {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopyDone(true);
+      showToast("클립보드에 자동으로 복사했습니다.", "success");
+    } catch {
+      showToast("자동 복사에 실패했습니다 — 아래 버튼으로 직접 복사해주세요.", "danger");
+    }
+  }
 
   const source = useMemo(
     () => sources?.find((s) => s.id === matchQuery.data?.source_id),
@@ -81,6 +103,7 @@ export default function MatchDetailPage() {
       setLastResult(res);
       setActionError(null);
       setCopyDone(false);
+      if (res.action === "approved") void autoCopy(res.clipboard_body);
     },
     onError: (err) => setActionError(describeError(err)),
     // 409/502 실패 시에도 서버가 상태를 되돌리거나 reply_actions 를 기록하므로 재조회가 필요하다.
@@ -106,6 +129,7 @@ export default function MatchDetailPage() {
       setLastResult(res);
       setActionError(null);
       setCopyDone(false);
+      if (res.action === "approved") void autoCopy(res.clipboard_body);
     },
     onError: (err) => setActionError(describeError(err)),
     onSettled: () => invalidate(),
@@ -122,8 +146,13 @@ export default function MatchDetailPage() {
 
   async function handleCopy() {
     if (lastResult?.action !== "approved") return;
-    await navigator.clipboard.writeText(lastResult.clipboard_body);
-    setCopyDone(true);
+    try {
+      await navigator.clipboard.writeText(lastResult.clipboard_body);
+      setCopyDone(true);
+      showToast("복사했습니다.", "success");
+    } catch {
+      showToast("복사에 실패했습니다.", "danger");
+    }
   }
 
   if (matchQuery.isLoading) return <p className="text-sm text-gray-500">불러오는 중…</p>;
@@ -251,18 +280,6 @@ export default function MatchDetailPage() {
           )}
 
           {actionError && <p className="text-sm text-tone-danger">{actionError}</p>}
-
-          {lastResult?.action === "sent" && (
-            <p className="text-sm text-tone-success">전송 완료 — external_reply_id: {lastResult.external_reply_id}</p>
-          )}
-          {lastResult?.action === "approved" && (
-            <div className="flex items-center gap-2 text-sm text-tone-success">
-              <span>승인 완료 — 아래 문구를 복사해 직접 전송하세요.</span>
-              <Button size="sm" variant="secondary" onClick={handleCopy}>
-                {copyDone ? "복사됨" : "클립보드 복사"}
-              </Button>
-            </div>
-          )}
         </Card>
       ) : verifyPending ? (
         <Card className="flex flex-col gap-3">
@@ -279,6 +296,20 @@ export default function MatchDetailPage() {
         </Card>
       ) : (
         <Card className="text-sm text-gray-500">이미 처리 완료된 매칭입니다 ({STATUS_LABEL[match.status]}).</Card>
+      )}
+
+      {/* 승인/재시도 직후 서버 상태가 즉시 replied 등으로 바뀌어도(재조회로 actionable 카드가 사라져도)
+          결과 안내·복사 버튼은 별도로 계속 보여야 한다 — 위 분기와 무관하게 렌더링. */}
+      {lastResult?.action === "sent" && (
+        <Card className="text-sm text-tone-success">전송 완료 — external_reply_id: {lastResult.external_reply_id}</Card>
+      )}
+      {lastResult?.action === "approved" && (
+        <Card className="flex items-center gap-2 text-sm text-tone-success">
+          <span>승인 완료 — 아래 문구를 복사해 직접 전송하세요.</span>
+          <Button size="sm" variant="secondary" onClick={handleCopy}>
+            {copyDone ? "복사됨" : "클립보드 복사"}
+          </Button>
+        </Card>
       )}
 
       <Card className="flex flex-col gap-2">
@@ -300,6 +331,8 @@ export default function MatchDetailPage() {
           </ul>
         )}
       </Card>
+
+      {toast && <Toast message={toast.message} tone={toast.tone} />}
     </section>
   );
 }
