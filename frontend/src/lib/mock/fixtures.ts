@@ -40,8 +40,10 @@ export const MOCK_SOURCES: Source[] = [
     poll_interval_sec: 600,
     enabled: true,
     last_success_at: "2026-07-19T08:30:00Z",
+    // M2 수용기준 재현: 429 주입 → health_status='degraded' + backoff_until 동시 반영
+    // (backend/app/poller.py _record_failure — rate_limited=True 경로).
     health_status: "degraded",
-    backoff_until: null,
+    backoff_until: "2026-07-22T15:30:00Z",
   },
   {
     id: 3,
