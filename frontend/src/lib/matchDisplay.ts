@@ -1,5 +1,5 @@
 import type { BadgeTone } from "../components/ui/Badge";
-import type { MatchedPostStatus, Source, SourceType } from "../types/api";
+import type { MatchedPostStatus, ReplyActionType, Source, SourceType } from "../types/api";
 
 export const STATUS_LABEL: Record<MatchedPostStatus, string> = {
   new: "신규",
@@ -75,6 +75,22 @@ const WRITABLE_SOURCE_TYPES: SourceType[] = ["threads"];
 export function isWritableSourceType(type: SourceType): boolean {
   return WRITABLE_SOURCE_TYPES.includes(type);
 }
+
+export const REPLY_ACTION_LABEL: Record<ReplyActionType, string> = {
+  approved: "승인(수동 복사)",
+  sent: "전송 성공",
+  failed: "전송 실패",
+  canceled: "무시(취소)",
+  unknown: "결과 불명(조정 대기)",
+};
+
+export const REPLY_ACTION_TONE: Record<ReplyActionType, BadgeTone> = {
+  approved: "info",
+  sent: "success",
+  failed: "danger",
+  canceled: "neutral",
+  unknown: "warning",
+};
 
 export function formatDateTime(iso: string | null): string {
   if (!iso) return "-";

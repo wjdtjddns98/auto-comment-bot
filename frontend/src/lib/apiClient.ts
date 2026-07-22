@@ -199,5 +199,5 @@ export const updateSnsAccountCredentials = (id: number, body: UpdateSnsAccountCr
   request<void>(`/api/sns-accounts/${id}/credentials`, { method: "PUT", body });
 
 // --- 감사 로그 ---
-export const getReplyActions = (matchId: number) =>
-  request<ReplyAction[]>("/api/reply-actions", { query: { match_id: matchId } });
+export const getReplyActions = (query?: { match_id?: number }) =>
+  request<ReplyAction[]>("/api/reply-actions", { query });
