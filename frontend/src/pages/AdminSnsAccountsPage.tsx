@@ -1,9 +1,11 @@
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  connectThreadsOAuth,
   createSnsAccount,
   deleteSnsAccount,
   getSnsAccounts,
+  getThreadsOAuthAuthorizeUrl,
   updateSnsAccountCredentials,
 } from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
@@ -17,6 +19,84 @@ import { Field, Input, Select, Textarea } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 
 const PLATFORMS: SnsPlatform[] = ["threads", "naver_cafe", "community"];
+
+function ThreadsOAuthConnectForm() {
+  const queryClient = useQueryClient();
+  const [code, setCode] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const authorizeMutation = useMutation({
+    mutationFn: getThreadsOAuthAuthorizeUrl,
+    onSuccess: ({ url }) => {
+      setError(null);
+      window.open(url, "_blank", "noopener,noreferrer");
+    },
+    onError: (err) => setError(describeApiError(err)),
+  });
+
+  const connectMutation = useMutation({
+    mutationFn: connectThreadsOAuth,
+    onSuccess: () => {
+      setCode("");
+      setDisplayName("");
+      setError(null);
+      queryClient.invalidateQueries({ queryKey: ["snsAccounts"] });
+    },
+    onError: (err) => setError(describeApiError(err)),
+  });
+
+  function handleConnect() {
+    if (!code.trim()) {
+      setError("연동 코드를 입력하세요.");
+      return;
+    }
+    connectMutation.mutate({
+      code: code.trim(),
+      display_name: displayName.trim() || undefined,
+    });
+  }
+
+  return (
+    <Card className="flex flex-col gap-4">
+      <div>
+        <h2 className="text-sm font-semibold text-gray-900">Threads 동의 화면으로 연동</h2>
+        <p className="text-xs text-gray-500">
+          동의 화면을 새 창으로 열어 승인하면 콜백 페이지에 인증 코드가 표시됩니다. 그 코드를
+          아래에 붙여넣으세요. 코드는 일회용이며 곧 만료됩니다.
+        </p>
+      </div>
+      <Button
+        variant="secondary"
+        className="self-start"
+        onClick={() => authorizeMutation.mutate()}
+        disabled={authorizeMutation.isPending}
+      >
+        {authorizeMutation.isPending ? "여는 중…" : "Threads로 연결"}
+      </Button>
+      <div className="flex flex-wrap gap-4">
+        <Field label="인증 코드">
+          <Input
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="콜백 페이지에서 복사한 코드"
+          />
+        </Field>
+        <Field label="표시 이름 (선택)">
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="예: @nutti_official"
+          />
+        </Field>
+      </div>
+      {error && <p className="text-sm text-tone-danger">{error}</p>}
+      <Button onClick={handleConnect} disabled={connectMutation.isPending} className="self-start">
+        {connectMutation.isPending ? "연동 중…" : "연동 완료"}
+      </Button>
+    </Card>
+  );
+}
 
 function CreateSnsAccountForm() {
   const queryClient = useQueryClient();
@@ -225,6 +305,7 @@ export default function AdminSnsAccountsPage() {
         </p>
       </div>
 
+      <ThreadsOAuthConnectForm />
       <CreateSnsAccountForm />
 
       {isLoading && <p className="text-sm text-gray-500">불러오는 중…</p>}

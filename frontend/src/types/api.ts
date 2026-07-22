@@ -111,6 +111,15 @@ export interface UpdateSnsAccountCredentialsRequest {
   credentials: Record<string, unknown>;
 }
 
+export interface ThreadsOAuthAuthorizeUrlResponse {
+  url: string;
+}
+
+export interface ThreadsOAuthConnectRequest {
+  code: string;
+  display_name?: string;
+}
+
 export type MatchedPostStatus =
   | "new"
   | "reviewing"
