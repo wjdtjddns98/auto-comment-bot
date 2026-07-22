@@ -12,7 +12,7 @@
 | 게시 idempotency-key 지원? | **미지원** | 공식 문서(Posts·Create Replies)에 idempotency/중복 방지 파라미터 언급 없음. 서드파티 API 평가(APIs.io)도 idempotency 0/9 |
 | 게시 플로우 | 2단계: `POST /{user_id}/threads`(컨테이너 생성, 답글이면 `reply_to_id` 포함) → `POST /{user_id}/threads_publish`(발행, `creation_id`) | 공식 Posts/Create Replies 문서. 발행 성공 시 Threads Media ID 반환 |
 | 컨테이너 수명 | **24시간 후 만료**. 발행 전 평균 30초 대기 권장 | 공식 문서 + 커뮤니티 구현체 다수 |
-| 생성 직후 즉시 publish 가능? | **거부될 수 있음** — 즉시 호출은 400 `code=24`(subcode 4279009, "미디어를 찾을 수 없음", `is_transient=false`)를 관찰. **3초 뒤 같은 creation_id 로 성공**(텍스트 기준 — 30초 권장치는 미디어 처리 대비 보수치로 해석). code 24 는 "컨테이너를 찾지 못함" = **발행 미수행 보장** — 어댑터는 짧은 재시도 후 소진 시 확정 실패로 분류한다 | R3 실측 2026-07-22 |
+| 생성 직후 즉시 publish 가능? | **거부될 수 있음** — 즉시 호출은 400 `code=24`(subcode 4279009, "미디어를 찾을 수 없음", `is_transient=false`)를 관찰. **3초 뒤 같은 creation_id 로 성공**(텍스트 기준 — 30초 권장치는 미디어 처리 대비 보수치로 해석). **code 24 를 발행 미수행의 보장으로 삼지는 않는다**(1회 관찰·특정 subcode 기준 — 공식 계약 아님, 독립 리뷰 반영): 어댑터는 짧은 재시도 후 소진 시 **결과 불명**으로 분류해 조정(§3.4)에 넘긴다 | R3 실측 2026-07-22 |
 | 이미 발행된 컨테이너에 `threads_publish` 재호출 | **HTTP 200 + 같은 media id 반환(에러 아님 — 사실상 idempotent).** 새 글이 생기지 않고 답글 쿼터도 재소비되지 않음(재호출 후 `reply_quota_usage` 불변 교차 확인). 관찰은 발행 직후(수 초~수 분) 재호출 1회 기준 — 24h 컨테이너 수명 내에서만 의미 | R3 실측 2026-07-22 (§4-R3) |
 | 게시된 답글 조회 | `GET /{media_id}/replies`·`GET /{media_id}/conversation` — 필드 `id, username, text, timestamp, is_reply, replied_to, root_post, permalink` 등, cursor 페이지네이션(`reverse` 기본 true). **`limit=100` 허용 실측 확인**(400 아님 — 2차 리뷰 사소-3 해소) | 공식 Reply Management 레퍼런스 + R3 실측 2026-07-22 |
 | "내가 쓴 답글" 전용 목록 | 전용 엔드포인트 **없음** → 조정은 대상 글 기준(`/{media_id}/replies`)으로 수행 | 공식 레퍼런스에 부재 |
@@ -199,7 +199,8 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
       200 + 같은 media id(idempotent, 쿼터 재소비 없음) ② 생성 직후 즉시 publish 는 400
       code=24(subcode 4279009, 준비 전) 가능 — 3초 뒤 성공 ③ `/replies?limit=100` 허용
       (사소-3 해소) ④ 답글 쿼터 별도 1,000건/24h. → §1·§3.5·§3.6 갱신 완료. 어댑터에
-      publish code-24 짧은 재시도(같은 creation_id·소진 시 확정 실패) 반영
+      publish code-24 짧은 재시도(같은 creation_id·소진 시 **결과 불명→조정 폴백**) 반영
+      — 24 를 확정 실패로 승격하지 않음(N=1 근거 부족, 독립 리뷰 blocker 반영)
 - [x] R4. 조정 잡(`app/reconcile.py`) + normalize 판정 단위 테스트(수동 답글 혼입·40자 미만
       본문·URL 포함 본문(앞/뒤 위치별)·timestamp 창·절단 prefix 판정 — `tests/test_reconcile.py`.
       동일 본문 답글 다수는 첫 매치 채택 — external_reply_id 오기록 가능성은 §3.6 과 같은
@@ -220,7 +221,8 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 - [ ] R8. **조정 1차 수단 승격**(R3 실측 근거): 조정 잡이 verify_meta 의 `container_id` 로
       `threads_publish` 를 재호출 — 200 + media id 면 그 id 로 즉시 sent 확정(텍스트 판정
       불필요·§3.6 잔여창 폐쇄), 컨테이너 만료(24h)·재호출 불가 시에만 현행 텍스트 판정 폴백.
-      §3.5 대안 비교의 확정 서술 참조
+      §3.5 대안 비교의 확정 서술 참조. 착수 전 FR-13(자동 재시도 금지)과의 정합 —
+      사람 재클릭 없는 시점의 외부 write 허용 여부 — 를 명시적으로 결정할 것(독립 리뷰 L2)
 
 ## 참고 문서
 

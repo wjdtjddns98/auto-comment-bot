@@ -9,8 +9,9 @@ URL·예외 메시지·로그에 절대 싣지 않는다(불변식 ③, M2 조�
 - publish 단계: 401/403/429 + 400 중 유효성/OAuth 계열 Meta code 만 → SendError,
   그 외 전부(5xx·408·409·목록 밖 4xx·transient 400·타임아웃·커넥션 오류)
   → SendOutcomeUnknown(container_id 보존)
-- publish 400 code=24(컨테이너 준비 전)는 같은 creation_id 로 짧게 재시도 후
-  소진 시 SendError — 재호출은 idempotent(R3 실측 2026-07-22, 설계 §1)
+- publish 400 code=24(컨테이너 준비 전)는 같은 creation_id 로 짧게 재시도(재호출은
+  idempotent — R3 실측 2026-07-22, 설계 §1). 소진 시엔 결과 불명 — "리소스 없음"이
+  발행 미수행을 보장한다는 공식 계약이 없어(N=1 관찰) 조정 안전망으로 넘긴다
 
 config: {"query": "...", "sns_account_id": N} — 수집 인증에 쓸 본인 threads 계정.
 """
@@ -47,13 +48,18 @@ _REPLIES_PAGE_CAP = 10  # 조정 조회 cursor 순회 상한(폭주 방어)
 _PUBLISH_DEFINITE_FAIL = {401, 403, 429}
 # HTTP 400 중 "요청 미수행 명확"으로 취급하는 Meta error code — 유효성/OAuth/권한 계열.
 # 목록 밖(특히 1 "API Unknown"·2 "API Service") 은 결과 불명으로 남긴다.
-# 24("미디어를 찾을 수 없음")는 컨테이너 자체를 못 찾은 것 = 발행 미수행 보장 —
-# R3 실측(2026-07-22, 설계 문서 §1). 재시도 소진 후에만 이 분류에 도달한다(아래).
-_DEFINITE_400_CODES = {100, 190, 200, 10, 24}
+# 24("미디어를 찾을 수 없음")는 넣지 않는다 — "리소스 없음 = 발행 미수행"은 N=1 실측
+# 관찰일 뿐 공식 계약이 아니고, 반례(발행 커밋 후 replica lag 로 24 응답)가 하나라도
+# 있으면 확정 실패→verify_meta 폐기→새 컨테이너 재시도 경로가 이중 게시가 된다
+# (독립 리뷰 blocker). 소진 시 결과 불명 → 기존 조정 안전망(§3.4)이 받는다.
+_DEFINITE_400_CODES = {100, 190, 200, 10}
 # 생성 직후의 publish 는 컨테이너 준비 전이라 400 code=24 로 거부될 수 있다(R3 실측:
-# 즉시 호출 400 code=24 → 3초 뒤 같은 creation_id 로 성공). 같은 creation_id 재호출은
-# 발행 완료 후에도 같은 media id 를 돌려주는 사실상 idempotent 동작(같은 실측)이므로
-# 짧은 재시도는 이중 게시를 만들 수 없다. SEND_TIMEOUT_SEC(120s) 예산 내 소폭(+6s).
+# 즉시 호출 400 code=24/subcode 4279009 → 3초 뒤 같은 creation_id 로 성공. 매치는
+# top-level code 로만 — 관찰 튜플보다 넓지만 오매치의 최악이 "+6초 후 결과 불명"이라
+# 안전). 같은 creation_id 재호출은 발행 완료 후에도 같은 media id 를 돌려주는 사실상
+# idempotent 동작(같은 실측)이므로 짧은 재시도는 이중 게시를 만들 수 없다.
+# 예산 2s+4s: approve 는 사람이 기다리는 동기 요청 — 공식 30초 처리 지연 권장치를 다
+# 기다리는 대신 소진 시 조정(verify_pending)으로 넘긴다. SEND_TIMEOUT_SEC(120s) 내.
 _PUBLISH_NOT_READY_CODE = 24
 _PUBLISH_RETRY_DELAYS = (2.0, 4.0)
 
@@ -221,7 +227,8 @@ class ThreadsAdapter:
 
             # 2단계: 발행 — 여기서부터의 불확실성은 전부 결과 불명(§3.2).
             # 준비 전(code 24)만은 같은 creation_id 로 짧게 재시도한다 — 재호출이
-            # idempotent 라 안전(R3 실측). 소진 시 아래 확정 실패 분류(24 포함)로 떨어진다.
+            # idempotent 라 안전(R3 실측). 소진 시 24 는 확정 목록에 없으므로 아래
+            # 분류가 결과 불명(container_id 보존 → 조정)으로 처리한다.
             for delay in (*_PUBLISH_RETRY_DELAYS, None):
                 try:
                     resp = await client.post(
