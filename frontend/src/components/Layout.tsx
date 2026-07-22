@@ -22,6 +22,7 @@ const navLinks = [
   { to: "/admin/sources", label: "소스", adminOnly: true },
   { to: "/admin/keywords", label: "키워드", adminOnly: true },
   { to: "/admin/templates", label: "템플릿", adminOnly: true },
+  { to: "/admin/users", label: "사용자", adminOnly: true },
   { to: "/sns-accounts", label: "SNS 계정" },
   { to: "/audit-log", label: "감사 로그" },
 ];

@@ -1,10 +1,12 @@
 import type {
+  AdminUser,
   ApproveMatchRequest,
   ApproveMatchResponse,
   CreateKeywordRequest,
   CreateSnsAccountRequest,
   CreateSourceRequest,
   CreateTemplateRequest,
+  CreateUserRequest,
   Health,
   Keyword,
   MatchDetail,
@@ -13,6 +15,7 @@ import type {
   PatchKeywordRequest,
   PatchSourceRequest,
   PatchTemplateRequest,
+  PatchUserRequest,
   ReplyAction,
   Source,
   SnsAccount,
@@ -201,3 +204,12 @@ export const updateSnsAccountCredentials = (id: number, body: UpdateSnsAccountCr
 // --- 감사 로그 ---
 export const getReplyActions = (query?: { match_id?: number }) =>
   request<ReplyAction[]>("/api/reply-actions", { query });
+
+// --- 사용자 관리 (admin, 제안 계약 — docs/API-SPEC.md 미확정, types/api.ts 주석 참조) ---
+export const getUsers = () => request<AdminUser[]>("/api/users");
+export const createUser = (body: CreateUserRequest) =>
+  request<AdminUser>("/api/users", { method: "POST", body });
+export const patchUser = (id: number, body: PatchUserRequest) =>
+  request<AdminUser>(`/api/users/${id}`, { method: "PATCH", body });
+export const deleteUser = (id: number) =>
+  request<void>(`/api/users/${id}`, { method: "DELETE" });

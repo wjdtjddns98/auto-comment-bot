@@ -13,11 +13,24 @@ import type {
 
 export interface MockUserRecord extends User {
   password: string;
+  created_at: string;
 }
 
 export const MOCK_USERS: MockUserRecord[] = [
-  { id: 1, email: "admin@example.com", password: "admin1234", role: "admin" },
-  { id: 2, email: "reviewer@example.com", password: "reviewer1234", role: "reviewer" },
+  {
+    id: 1,
+    email: "admin@example.com",
+    password: "admin1234",
+    role: "admin",
+    created_at: "2026-07-08T00:00:00Z",
+  },
+  {
+    id: 2,
+    email: "reviewer@example.com",
+    password: "reviewer1234",
+    role: "reviewer",
+    created_at: "2026-07-08T00:00:00Z",
+  },
 ];
 
 export const MOCK_SOURCES: Source[] = [
