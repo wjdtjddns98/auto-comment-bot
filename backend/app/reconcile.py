@@ -55,17 +55,34 @@ def is_our_reply(
 
 
 async def reconcile_tick() -> None:
-    """스케줄러 진입점 — verify_pending 전건 순차 조정."""
+    """스케줄러 진입점 — verify_pending 전건 순차 조정 + 조정 실패 상태 집계(R-2)."""
     rows = await MatchedPost.filter(status=PostStatus.verify_pending).prefetch_related("source")
+    fetch_failed: set[int] = set()
+    fetch_ok: set[int] = set()
     for post in rows:
         try:
-            await reconcile_post(post)
+            outcome = await reconcile_post(post)
         except Exception:
             # 다음 행/다음 주기가 이어가면 된다 — 원문은 서버 로그에만(불변식 ③).
             logger.exception("조정 처리 실패 match=%s", post.id)
+            continue
+        if outcome == "fetch_failed":
+            fetch_failed.add(post.source_id)
+        elif outcome == "fetch_ok":
+            fetch_ok.add(post.source_id)
+    # 조정 전용 실패 상태 갱신(2차 리뷰 R-2) — poller 의 수집 성공이 health 를 ok 로
+    # 되돌리지 않게 하는 플래그. 틱 단위 집계라 같은 소스에 성공/실패 행이 섞여도
+    # 실패가 하나라도 있으면 유지된다. 조정 대상이 사라진 소스는 해제(영구 잔류 방지 —
+    # active 는 틱 시작 스냅샷이라 틱 도중 종결분은 다음 틱, 즉 ≤60초 지연 해제).
+    active = {post.source_id for post in rows}
+    poller._reconcile_failing &= active
+    poller._reconcile_failing |= fetch_failed
+    poller._reconcile_failing -= fetch_ok - fetch_failed
 
 
-async def reconcile_post(post: MatchedPost) -> None:
+async def reconcile_post(post: MatchedPost) -> str | None:
+    """행 1건 조정. 반환은 R-2 집계 재료: "fetch_ok"(조회 성공)·"fetch_failed"(조정 전용
+    조회 실패)·None(조회 미도달/rate-limit — 공유 backoff 회계라 조정 전용이 아님)."""
     meta = post.verify_meta
     try:
         # 재료 검증은 조회 호출 전에 전부 — malformed meta 행이 매 틱 실 API 호출을
@@ -123,13 +140,18 @@ async def reconcile_post(post: MatchedPost) -> None:
         # 401/403(토큰 만료) 포함 조회 실패 — attempts 미증가, 다음 주기 재시도.
         # read-only 라 반복해도 부작용 없음. 지속되면 사람이 ignore 로 종결(설계 §3.4-5).
         # health 회계로 소스 배지에 가시화한다(FR-18, 1차 적대 리뷰 F-3) — 원문은 로그에만.
+        # 플래그는 틱말 배치가 아니라 **지금 즉시** 세운다(PR #43 검증 리뷰 High-1) —
+        # 배치 반영까지의 창 동안 동시 실행된 poll_tick 의 수집 성공이 아래 degraded
+        # 회계를 ok 로 덮는 레이스 차단. 아래 await 전의 동기 실행이라 창이 닫힌다.
+        # 틱말 배치와도 일관: 이 행은 fetch_failed 로 집계돼 플래그가 유지된다.
+        poller._reconcile_failing.add(source.id)
         logger.exception("조정 조회 실패 match=%s source=%s", post.id, source.id)
         # 조회 대기 중 poller 가 건 backoff 를 stale 객체 회계(backoff_until=None 저장)로
         # 지우지 않는다(2차 리뷰 R-1) — 활성 backoff 가 있으면 health 회계를 생략한다.
         await source.refresh_from_db()
         if not (source.backoff_until and source.backoff_until > datetime.now(UTC)):
             await poller._record_failure(source, retry_after_sec=None, rate_limited=False)
-        return
+        return "fetch_failed"
 
     final_body = meta.get("final_body") or ""
     found = next(
@@ -142,7 +164,7 @@ async def reconcile_post(post: MatchedPost) -> None:
     )
     if found is not None:
         await _settle_sent(post, meta, found)
-        return
+        return "fetch_ok"
 
     attempts = int(meta.get("attempts", 0)) + 1
     if attempts < settings.reconcile_max_attempts:
@@ -151,7 +173,7 @@ async def reconcile_post(post: MatchedPost) -> None:
         await MatchedPost.filter(id=post.id, status=PostStatus.verify_pending).update(
             verify_meta=meta
         )
-        return
+        return "fetch_ok"
     # 미게시 판정 전 최종 확인(1차 적대 리뷰 F-2): DB 에 전송 증거(sent 행 — 좀비 요청의
     # 사후 audit 등)가 있으면 조회 판정이 못 찾았어도 retry 를 열지 않는다(불변식 ②).
     if await ReplyActionLog.exists(matched_post_id=post.id, action=ReplyAction.sent):
@@ -159,7 +181,7 @@ async def reconcile_post(post: MatchedPost) -> None:
             status=PostStatus.replied, verify_meta=None
         )
         logger.warning("조정: sent 증거 발견 — 미게시 판정 대신 replied 정합 회복 match=%s", post.id)
-        return
+        return "fetch_ok"
     # 미게시 판정(설계 §3.4-4): retry 재개. 오판 잔여 위험은 §3.6 — FE 문구가 최종 방어선.
     async with in_transaction():
         await ReplyActionLog.create(
@@ -174,6 +196,7 @@ async def reconcile_post(post: MatchedPost) -> None:
             status=PostStatus.reviewing, verify_meta=None
         )
     logger.info("조정 미게시 판정 match=%s attempts=%d → reviewing", post.id, attempts)
+    return "fetch_ok"
 
 
 async def _settle_sent(post: MatchedPost, meta: dict, found: FetchedReply) -> None:

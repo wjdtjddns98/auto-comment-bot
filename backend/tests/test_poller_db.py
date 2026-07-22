@@ -125,6 +125,31 @@ async def test_unknown_adapter_marks_down(env, monkeypatch):
     assert source.health_status == HealthStatus.down
 
 
+async def test_poll_success_preserves_concurrent_reconcile_backoff(env, monkeypatch):
+    """fetch 대기 중 조정 틱이 건 **최신** backoff/degraded 를 poll 성공 회계(stale 객체)가
+    지우지 않는다(PR #43 검증 리뷰 High-2 — 2차 리뷰 R-1 의 역방향, 불변식 ④)."""
+    source, _, _ = env
+    future = datetime.now(UTC) + timedelta(minutes=5)
+
+    class ConcurrentBackoffAdapter:
+        can_write = False
+
+        async def fetch(self, _source, since):
+            # fetch I/O 대기 중 reconcile 의 429 회계가 끼어든 상황 재현 — DB 에만 반영
+            await Source.filter(id=source.id).update(
+                backoff_until=future, health_status=HealthStatus.degraded
+            )
+            return []
+
+    monkeypatch.setattr(poller, "get_adapter", lambda _t: ConcurrentBackoffAdapter())
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until is not None  # 방금 걸린 backoff 유지
+    assert fresh.health_status == HealthStatus.degraded  # ok 로 덮지 않는다
+    assert fresh.last_success_at is not None  # 수집 회계(커서 전진)는 정상
+
+
 async def test_store_failure_is_accounted(env, monkeypatch):
     """저장 단계 실패도 fetch 실패와 동일하게 회계된다(커서 미전진 + degraded)."""
     source, _, fake = env

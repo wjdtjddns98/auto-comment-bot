@@ -24,6 +24,14 @@ _DOWN_AFTER_FAILURES = 5
 
 _fail_counts: dict[int, int] = {}
 state: dict = {"last_tick": None}  # /health poller heartbeat (FR-17)
+# 조정 전용 실패 상태(어댑터 2차 리뷰 R-2): 조정 조회가 실패 중인 소스는 수집 성공이
+# health 를 ok 로 되돌리지 않는다 — 되돌리면 다음 조정 틱이 다시 degraded 로 낮추며
+# 배지가 주기마다 깜빡여, 지속 장애(전송 계정 토큰 만료 등)가 일시 문제처럼 보인다.
+# 갱신은 reconcile_tick 이 틱 단위로 집계하고, 조회 실패 시엔 행 처리 시점에 즉시
+# 추가된다(PR #43 검증 리뷰 High-1 — 배치 반영 창 레이스 차단). in-memory(NFR-P1 단일
+# 워커) — 재시작으로 리셋되면 다음 조정 틱(60초)까지 poll 성공이 ok 로 되돌리는 1회성
+# 깜빡임이 있을 수 있다(재시작 이벤트 한정, 허용).
+_reconcile_failing: set[int] = set()
 
 
 def _now() -> datetime:
@@ -39,8 +47,9 @@ def _is_due(source: Source, now: datetime) -> bool:
 
 
 def forget_source(source_id: int) -> None:
-    """소스 삭제 시 실패 카운터 정리(미세 누수 방지)."""
+    """소스 삭제 시 실패 카운터/조정 실패 상태 정리(미세 누수 방지)."""
     _fail_counts.pop(source_id, None)
+    _reconcile_failing.discard(source_id)
 
 
 async def poll_tick() -> None:
@@ -85,9 +94,22 @@ async def poll_source(source: Source) -> int:
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
     _fail_counts.pop(source.id, None)
     source.last_success_at = source.last_polled_at
-    source.health_status = HealthStatus.ok
-    source.backoff_until = None
-    await source.save(update_fields=["last_success_at", "health_status", "backoff_until"])
+    fields = ["last_success_at"]
+    # fetch 대기 중 조정(reconcile) 틱이 같은 소스에 걸었을 수 있는 **최신** backoff 를
+    # 이 stale 객체의 backoff_until=None 저장으로 지우지 않는다(PR #43 검증 리뷰
+    # High-2 — 2차 리뷰 R-1 의 역방향). 미래 backoff 가 새로 걸려 있으면 그 회계
+    # (429 degraded)를 존중해 backoff/health 둘 다 건드리지 않는다.
+    row = await Source.filter(id=source.id).values_list("backoff_until", flat=True)
+    backoff_active = bool(row) and row[0] is not None and row[0] > _now()
+    if not backoff_active:
+        source.backoff_until = None
+        fields.append("backoff_until")
+        # 조정 조회가 실패 중이면 health 는 건드리지 않는다(R-2 깜빡임 방지) — 이 객체의
+        # health 값 자체가 stale 일 수 있으므로 조건부 대입이 아니라 저장 필드에서 제외한다.
+        if source.id not in _reconcile_failing:
+            source.health_status = HealthStatus.ok
+            fields.append("health_status")
+    await source.save(update_fields=fields)
     return stored
 
 
