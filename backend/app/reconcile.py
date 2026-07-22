@@ -94,15 +94,18 @@ async def reconcile_post(post: MatchedPost) -> None:
     account = None
     if meta.get("sns_account_id") is not None:
         account = await SnsAccount.get_or_none(id=meta["sns_account_id"])
-    # 판정 키는 결과 불명 시점의 스냅샷(verify_meta.platform_username)을 우선한다
-    # (토큰 교체 API 3차 독립 리뷰 blocker — 스냅샷 이후의 자격증명 교체가 신원을 바꿔
-    # "실제 게시됨"을 미게시로 오판하는 것 방지). 스냅샷 없는 행(크래시 잔재 등)은
-    # 종전대로 live 값 폴백 — 핸들 변경(rename)에는 live 가 유리(어댑터 2차 리뷰 중요-1).
+    # 판정 키 후보: 결과 불명 시점 스냅샷(verify_meta.platform_username)과 live 값을
+    # **둘 다** 검사한다(4차 검증 리뷰 Medium). 스냅샷은 자격증명 교체(신원 교체)가 판정을
+    # 오염시키는 것을 막고(3차 독립 리뷰 blocker), live 는 핸들 변경(rename) 후 /replies 가
+    # 과거 답글에 현재 핸들을 반환하는 계약일 경우를 놓치지 않는다(2차 리뷰 중요-1 —
+    # API 가 어느 쪽을 주는지 미확정이라 양쪽 다 안전하게). 후보 확대의 오판 방향은
+    # "더 찾음"(replied 종결) — retry 개방이 아니라 이중 게시 안전 쪽(불변식 ②).
     # "크래시+교체" 복합 잔여 위험은 설계 §3.6 참조.
-    username = meta.get("platform_username") or (
-        account.platform_username if account else None
-    )
-    if not username:
+    usernames = {
+        meta.get("platform_username"),
+        account.platform_username if account else None,
+    } - {None, ""}
+    if not usernames:
         # username 없이는 판정 불가(설계 §3.1) — 계정 삭제/미저장. 사람 탈출구는 ignore.
         logger.error("조정 불가: 판정용 platform_username 없음 match=%s", post.id)
         return
@@ -130,7 +133,12 @@ async def reconcile_post(post: MatchedPost) -> None:
 
     final_body = meta.get("final_body") or ""
     found = next(
-        (r for r in replies if is_our_reply(r, username, claim_ts, final_body)), None
+        (
+            r
+            for r in replies
+            if any(is_our_reply(r, u, claim_ts, final_body) for u in usernames)
+        ),
+        None,
     )
     if found is not None:
         await _settle_sent(post, meta, found)
