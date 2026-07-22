@@ -5,11 +5,22 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from tortoise.exceptions import IntegrityError
+from tortoise.transactions import in_transaction
 
 from app import poller
 from app.api.deps import require_admin, require_csrf
 from app.api.schemas import PatchModel
-from app.models import HealthStatus, Source, SourceType, User
+from app.models import (
+    HealthStatus,
+    Keyword,
+    MatchedPost,
+    PostStatus,
+    ReplyAction,
+    ReplyActionLog,
+    Source,
+    SourceType,
+    User,
+)
 from app.sources import get_adapter
 
 router = APIRouter(
@@ -124,15 +135,47 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
 
 @router.delete("/{source_id}", status_code=204, dependencies=[Depends(require_csrf)])
 async def delete_source(source_id: int) -> None:
+    """소스 삭제 — 수집물(매칭·비발송 감사 이력)과 스코프 키워드를 함께 정리한다.
+
+    실발송 증거·조정 재료는 불가침(불변식 ②): sent 이력이 있거나 전송 진행 중
+    (sending·verify_pending)인 매칭이 하나라도 있으면 409 — 비활성화가 정식 경로.
+    비발송 이력(approved 등)까지 함께 지우는 것은 제품 결정(2026-07-22) — 테스트/
+    오등록 소스의 원클릭 삭제 UX 를 감사 완전성보다 우선한다(실발송 이력 제외).
+    """
     try:
-        deleted = await Source.filter(id=source_id).delete()
+        async with in_transaction():
+            # parent-first 락(자격증명 교체와 동일 순서) — 동시 삭제/수정 직렬화
+            source = await Source.filter(id=source_id).select_for_update().first()
+            if source is None:
+                raise HTTPException(status_code=404, detail="소스가 없습니다")
+            # 매칭 행 전부 잠금 — 동시 approve 의 CAS 클레임(new→sending)이 보호 검사와
+            # 삭제 사이에 끼어드는 창을 닫는다(클레임 UPDATE 는 커밋까지 블록된 뒤
+            # 행이 사라져 0행 → abort. 이중 게시·유령 전송 경로 없음).
+            matches = await MatchedPost.filter(source_id=source_id).select_for_update()
+            match_ids = [m.id for m in matches]
+            in_flight = any(
+                m.status in (PostStatus.sending, PostStatus.verify_pending) for m in matches
+            )
+            has_sent = bool(match_ids) and await ReplyActionLog.filter(
+                matched_post_id__in=match_ids, action=ReplyAction.sent
+            ).exists()
+            if in_flight or has_sent:
+                raise HTTPException(
+                    status_code=409,
+                    detail="실발송 이력이 있거나 전송 진행 중인 매칭이 있는 소스는 삭제할"
+                    " 수 없습니다(감사 보호) — enabled=false 비활성화가 정식 경로입니다",
+                )
+            # RESTRICT 3중(이력→매칭→소스) 순서대로 명시 삭제 — DB cascade 아님.
+            # 관계 필터 삭제(matched_post__source_id)는 pg 에서 DELETE+JOIN 구문 오류라
+            # 잠금 조회로 확보한 id 목록을 쓴다(id 집합은 락으로 고정돼 있어 정확).
+            if match_ids:
+                await ReplyActionLog.filter(matched_post_id__in=match_ids).delete()
+                await MatchedPost.filter(id__in=match_ids).delete()
+            await Keyword.filter(source_scope_id=source_id).delete()
+            await Source.filter(id=source_id).delete()
     except IntegrityError as exc:
-        # RESTRICT: 매칭 이력(matched_posts) 또는 스코프된 키워드가 남아 있으면 삭제 불가.
+        # 락 이후의 잔여 경합(신규 FK 참조 등) 방어 — 롤백으로 부분 삭제 없음
         raise HTTPException(
-            status_code=409,
-            detail="매칭 이력 또는 스코프된 키워드가 있는 소스는 삭제할 수 없습니다"
-            " — 키워드를 먼저 정리하거나 enabled=false 로 비활성화하세요",
+            status_code=409, detail="소스 상태가 변경되었습니다 — 다시 시도해 주세요"
         ) from exc
-    if not deleted:
-        raise HTTPException(status_code=404, detail="소스가 없습니다")
     poller.forget_source(source_id)
