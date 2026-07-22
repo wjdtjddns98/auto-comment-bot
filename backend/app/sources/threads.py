@@ -367,3 +367,127 @@ async def probe_republish(account_id: int, reply_to: str, text: str) -> None:
         )
         # 핵심 관찰점: 같은 media id 반환(사실상 idempotent)인가, 에러인가
         print(f"[3] 2차 publish(재호출): HTTP {resp.status_code} → {resp.json()}")
+
+
+# ── OAuth 코드 교환 (앱 심사 — 동의 화면 기반 계정 연동, API-SPEC §SNS 계정) ────────
+
+# 인증 코드 교환/장기 토큰 전환은 v1.0 프리픽스가 아닌 루트 경로 — 공식 계약 그대로.
+_OAUTH_TOKEN_URL = "https://graph.threads.net/oauth/access_token"
+_OAUTH_EXCHANGE_URL = "https://graph.threads.net/access_token"
+# 동의 화면(authorize)은 www.threads.net — FE 가 사용자를 보낼 URL 의 베이스.
+OAUTH_AUTHORIZE_URL = "https://threads.net/oauth/authorize"
+# 신청 권한 전체 — 콘솔 앱 검수 신청 목록과 일치해야 동의 화면에 같은 범위가 뜬다.
+OAUTH_SCOPES = (
+    "threads_basic,threads_keyword_search,threads_content_publish,"
+    "threads_read_replies,threads_manage_replies"
+)
+
+
+class OAuthExchangeError(Exception):
+    """코드 무효/만료/재사용 등 교환 거부. 메시지는 audit 안전 요약만(코드/토큰/시크릿 없음)."""
+
+
+class OAuthUpstreamError(Exception):
+    """Threads API 통신 실패/일시 장애(타임아웃·429·5xx). 메시지는 고정 요약만 —
+    httpx 예외 문자열에는 URL(시크릿 쿼리 포함 가능)이 실리므로 절대 전달하지 않는다."""
+
+
+def _json_dict(resp: httpx.Response) -> dict:
+    """200 응답의 JSON dict 파싱 — 비JSON/비dict 는 업스트림 이상으로 취급."""
+    try:
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 - JSONDecodeError 포함
+        raise OAuthUpstreamError("Threads API 응답 형식 이상(비 JSON)") from exc
+    if not isinstance(body, dict):
+        raise OAuthUpstreamError("Threads API 응답 형식 이상(비 dict)")
+    return body
+
+
+def _raise_for_oauth_status(resp: httpx.Response) -> None:
+    """비 200 응답 분류: 429/5xx=일시 장애(업스트림), 그 외 4xx=교환 거부(코드 무효 계열)."""
+    if resp.status_code == 200:
+        return
+    if resp.status_code == 429 or resp.status_code >= 500:
+        raise OAuthUpstreamError(_error_summary(resp))
+    raise OAuthExchangeError(_error_summary(resp))
+
+
+async def oauth_exchange_code(code: str) -> dict:
+    """인증 코드 → 장기(60일) 토큰 + 프로필. 반환:
+    {"access_token": str, "expires_in": int, "user_id": str, "username": str}.
+
+    시크릿/토큰/코드는 응답·예외 메시지·우리 로그 어디에도 싣지 않는다(불변식 ③).
+    장기 토큰 전환의 쿼리 파라미터 전달은 공식 계약인데, **httpx 는 INFO 레벨에서
+    전체 URL(쿼리 포함)을 로깅하므로** main.py 가 httpx/httpcore 로거를 WARNING 으로
+    고정한다(1차 적대 리뷰 High-2 실측). 네트워크 예외(httpx.RequestError)의 문자열에도
+    URL 이 실릴 수 있어 고정 메시지의 OAuthUpstreamError 로 변환한다.
+    """
+    from app.config import settings
+
+    if not (
+        settings.threads_app_id and settings.threads_app_secret and settings.threads_redirect_uri
+    ):
+        raise RuntimeError("Threads OAuth 설정(threads_app_id/secret/redirect_uri) 미설정")
+    try:
+        async with _client() as client:
+            # 1) 인증 코드 → 단기(1시간) 토큰. 코드는 1회용 — 재사용/만료는 4xx.
+            resp = await client.post(
+                _OAUTH_TOKEN_URL,
+                data={
+                    "client_id": settings.threads_app_id,
+                    "client_secret": settings.threads_app_secret,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": settings.threads_redirect_uri,
+                    "code": code,
+                },
+            )
+            _raise_for_oauth_status(resp)
+            short_token = _json_dict(resp).get("access_token")
+            if not isinstance(short_token, str) or not short_token:
+                raise OAuthUpstreamError("교환 응답에 access_token 없음")
+
+            # 2) 단기 → 장기(60일) 토큰. 쿼리 파라미터는 공식 계약(위 docstring).
+            resp = await client.get(
+                _OAUTH_EXCHANGE_URL,
+                params={
+                    "grant_type": "th_exchange_token",
+                    "client_secret": settings.threads_app_secret,
+                    "access_token": short_token,
+                },
+            )
+            _raise_for_oauth_status(resp)
+            body = _json_dict(resp)
+            long_token = body.get("access_token")
+            if not isinstance(long_token, str) or not long_token:
+                raise OAuthUpstreamError("장기 토큰 응답에 access_token 없음")
+            try:
+                # OverflowError: float('inf') 류 이상값 방어(2차 리뷰 M1 — REPL 재현)
+                expires_in = max(0, int(body.get("expires_in") or 0))
+            except (TypeError, ValueError, OverflowError):
+                expires_in = 0
+
+            # 3) 프로필 확보 — 안정 식별자(user id, upsert 키)와 판정 키(username).
+            resp = await client.get(
+                f"{_API}/me", params={"fields": "id,username"}, headers=_auth(long_token)
+            )
+            _raise_for_oauth_status(resp)
+            me = _json_dict(resp)
+            raw_id, raw_username = me.get("id"), me.get("username")
+            # 안정 식별자 없이는 upsert 가 변경 가능한 username 에 의존하게 된다
+            # (1차 적대 리뷰 High-5). 타입까지 fail-closed 로 강제(2차 리뷰 M2 —
+            # dict/list 등을 str() 로 뭉개 저장하지 않는다).
+            if not isinstance(raw_id, (str, int)) or not isinstance(raw_username, str):
+                raise OAuthUpstreamError("프로필 응답의 id/username 형식 이상")
+            user_id = str(raw_id)
+            username = raw_username
+            if not user_id or not username:
+                raise OAuthUpstreamError("프로필 응답에 id/username 없음")
+    except httpx.RequestError as exc:
+        # 예외 문자열에 URL(시크릿 쿼리)이 실릴 수 있다 — 고정 메시지로만 변환(불변식 ③)
+        raise OAuthUpstreamError("Threads API 통신 실패(네트워크)") from exc
+    return {
+        "access_token": long_token,
+        "expires_in": expires_in,
+        "user_id": user_id,
+        "username": username,
+    }

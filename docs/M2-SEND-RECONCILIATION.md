@@ -250,6 +250,14 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       최소안: 호출부 try/except 로 로그 후 "fetch_ok" 반환(롤백·verify_pending 유지 그대로라
       전송 안전성 불변) + 회귀 테스트(기존 플래그 + non-sent IntegrityError → 해제 확인).
 
+- [ ] R10. **Threads OAuth 잔여**(2차 적대 리뷰, 2026-07-22 — 병합 수용 판정, 후속):
+      ① 수동 등록 계정(platform_user_id null)과 OAuth 재연동이 매칭되지 않아 계정 행이
+      갈라질 수 있음 — 수동 계정 정리/이관 UX 는 제품 결정 필요(2차 M3).
+      ② `_raise_for_oauth_status` 가 3단계 공용이라 장기 전환·/me 의 401/403 이 "코드
+      무효(400)"로 오분류될 여지(2차 L2, 실사용 가능성 낮음). ③ 테스트 공백: state
+      위조 시 업스트림 0회·TTL 경계·2/3단계 RequestError·advisory lock 실동시성(2차 L3).
+      ④ Dockerfile 이 --workers 1 을 암묵 보장 — in-memory state 의존 명시 검토(2차 L4).
+
 ## 참고 문서
 
 - Threads Posts(게시 2단계·250/24h·30초 대기): developers.facebook.com/docs/threads/posts

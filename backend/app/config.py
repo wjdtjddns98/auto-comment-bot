@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     notion_report_db: str = "915726bfb5154593b5def3ea1cacc813"
     notion_scrum_db: str = "fe5c49f4a3fb40898ed983ab22e9e8e3"
 
+    # Threads OAuth (앱 심사 — 동의 화면 기반 계정 연동). 비면 OAuth 경로 503.
+    # secret 은 .env 로만 주입 — 코드/로그/응답에 노출 금지(불변식 ③).
+    threads_app_id: str = ""
+    threads_app_secret: str = Field(default="", repr=False)  # repr/디버그 출력에서도 제외
+    threads_redirect_uri: str = ""  # 콘솔에 등록된 redirect URI 와 정확히 일치해야 함
+
     # 인증/암호화 (M1)
     # 세션 쿠키 서명·암호화 키(Fernet). dev 에서 비면 임시 키 자동 생성(app/auth.py).
     session_fernet_key: str = ""

@@ -6,8 +6,13 @@ admin 은 운영 파악용으로 전체 조회·삭제 가능. 자격증명은 �
 재노출하지 않는다. read path 는 secret 테이블을 조회조차 하지 않는 전용 스키마
 (MUST-FIX #3, NFR-S1). M2 에서 OAuth 콜백 경로가 이 위에 얹힌다.
 """
-from datetime import datetime
+import hashlib
+import logging
+import secrets
+import time
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,7 +21,10 @@ from tortoise.transactions import in_transaction
 
 from app import crypto
 from app.api.deps import current_user, require_csrf
+from app.config import settings
 from app.models import AccountStatus, Platform, Role, SnsAccount, SnsAccountSecret, User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/sns-accounts", tags=["sns-accounts"],
@@ -160,3 +168,189 @@ async def delete_account(
     # secret 은 FK cascade 로 함께 삭제된다. 타인 계정은 존재 여부도 노출하지 않는다(404).
     if not await visible_accounts(user).filter(id=account_id).delete():
         raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
+
+
+# ── Threads OAuth 연동 (동의 화면 기반 — 앱 심사 스크린캐스트 요건) ──────────────────
+
+# state 저장소: user_id → (state, 만료 monotonic). in-memory 는 단일 워커 전제(NFR-P1)와
+# 일치 — 재시작하면 진행 중이던 연동만 무효화된다(다시 연동하면 됨). 용도: 콜백 URL 로
+# 노출되는 code 를 다른 로그인 사용자가 자기 세션에 제출하는 것 차단(1차 적대 리뷰
+# High-3). **사용자당 미완료 state 1개**(재발급이 덮어씀) — 반복 발급으로 저장소가
+# 무한 성장하는 self-DoS 차단(2차 리뷰 High-1), 크기는 사용자 수로 자연 상한.
+_OAUTH_STATE_TTL_SEC = 600
+_oauth_states: dict[int, tuple[str, float]] = {}
+
+
+def _issue_oauth_state(user_id: int) -> str:
+    state = secrets.token_urlsafe(32)
+    _oauth_states[user_id] = (state, time.monotonic() + _OAUTH_STATE_TTL_SEC)
+    return state
+
+
+def _consume_oauth_state(state: str, user_id: int) -> bool:
+    """1회용 소비 — 소유자 일치·미만료 시에만 소비한다. 타인이 유출 state 를 제출해도
+    피해자의 정상 state 는 지워지지 않는다(2차 리뷰 Low-1 — 검증 후 pop)."""
+    entry = _oauth_states.get(user_id)
+    if (
+        entry is None
+        or not secrets.compare_digest(entry[0], state)
+        or entry[1] < time.monotonic()
+    ):
+        return False
+    _oauth_states.pop(user_id, None)
+    return True
+
+
+class ThreadsOAuthIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 인증 코드는 1회용·단수명 — 저장하지 않고 즉시 교환만 한다. 응답/로그 echo 금지.
+    code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=255)
+
+
+@router.get("/threads-oauth/authorize-url")
+async def threads_authorize_url(user: Annotated[User, Depends(current_user)]) -> dict:
+    """FE 가 사용자를 보낼 Threads 동의 화면 URL. 설정 미비면 503(등록 경로와 동일 원칙).
+
+    state 는 서버 발급(사용자 바인딩·10분 TTL·1회용) — 콜백 페이지가 code 와 함께
+    되돌려주고 POST 에서 검증된다. secret 포함 전체 설정을 검사한다(어느 하나라도
+    없으면 어차피 교환이 불가 — 동의 화면까지 보내놓고 실패시키지 않는다).
+    """
+    from app.sources.threads import OAUTH_AUTHORIZE_URL, OAUTH_SCOPES
+
+    if not (
+        settings.threads_app_id and settings.threads_app_secret and settings.threads_redirect_uri
+    ):
+        raise HTTPException(
+            status_code=503, detail="Threads OAuth 설정이 없습니다 — 서버 설정 필요"
+        )
+    query = urlencode(
+        {
+            "client_id": settings.threads_app_id,
+            "redirect_uri": settings.threads_redirect_uri,
+            "scope": OAUTH_SCOPES,
+            "response_type": "code",
+            "state": _issue_oauth_state(user.id),
+        }
+    )
+    return {"url": f"{OAUTH_AUTHORIZE_URL}?{query}"}
+
+
+def _identity_lock_key(user_id: int, platform_user_id: str) -> int:
+    """트랜잭션 advisory lock 키 — 같은 (사용자, Threads 신원) 동시 연동 직렬화.
+    select_for_update 는 '아직 없는 행'을 잠글 수 없어 동시 create 중복을 못 막는다
+    (1차 적대 리뷰 High-4). 부분 unique(마이그레이션 6_)가 DB 백스톱."""
+    digest = hashlib.sha256(f"{user_id}:threads:{platform_user_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
+
+
+@router.post("/threads-oauth", status_code=201, dependencies=[Depends(require_csrf)])
+async def threads_oauth_connect(
+    body: ThreadsOAuthIn, user: Annotated[User, Depends(current_user)]
+) -> SnsAccountOut:
+    """인증 코드 → 장기 토큰 교환 → 계정 연동. 같은 신원(안정 user id) 재연동이면
+    새 계정이 아니라 자격증명 교체(계정 id 보존 — 소스 config 참조 유지).
+
+    수동 토큰 등록(POST /)과 대비: 동의 화면을 거치므로 토큰 수명(60일)·만료 시각을
+    알고 저장한다. 교환 거부 400 / 업스트림 장애 502 — 전부 고정 메시지(echo 없음).
+    """
+    from app.sources.threads import (
+        OAuthExchangeError,
+        OAuthUpstreamError,
+        oauth_exchange_code,
+    )
+
+    if not _consume_oauth_state(body.state, user.id):
+        raise HTTPException(
+            status_code=400,
+            detail="연동 세션이 만료되었거나 유효하지 않습니다 — 다시 연동해 주세요",
+        )
+    try:
+        result = await oauth_exchange_code(body.code)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503, detail="Threads OAuth 설정이 없습니다 — 서버 설정 필요"
+        ) from exc
+    except OAuthExchangeError as exc:
+        # 요약(HTTP 상태/Meta code)은 서버 로그로만 — 응답은 고정 메시지.
+        logger.warning("Threads OAuth 코드 교환 거부: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="인증 코드가 유효하지 않거나 만료되었습니다 — 다시 연동해 주세요",
+        ) from exc
+    except OAuthUpstreamError as exc:
+        logger.warning("Threads OAuth 업스트림 장애: %s", exc)
+        # state 는 이미 소비됐고 코드도 소진됐을 수 있다 — 같은 요청 재시도가 아니라
+        # 처음부터 재연동을 안내한다(2차 리뷰 M4 — 문구·실동작 정합).
+        raise HTTPException(
+            status_code=502,
+            detail="Threads 연동 서버와 통신하지 못했습니다 — 처음부터 다시 연동해 주세요",
+        ) from exc
+    try:
+        ciphertext = crypto.encrypt_credentials({"access_token": result["access_token"]})
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
+        ) from exc
+    expires_at = (
+        datetime.now(UTC) + timedelta(seconds=result["expires_in"])
+        if result["expires_in"] > 0
+        else None
+    )
+    username = result["username"][:255]
+    platform_user_id = result["user_id"][:64]
+    try:
+        async with in_transaction() as tx:
+            # 같은 (사용자, 신원) 동시 연동 직렬화 — 행이 없을 때도 잠긴다(위 헬퍼 참조)
+            await tx.execute_query(
+                "SELECT pg_advisory_xact_lock($1)",
+                [_identity_lock_key(user.id, platform_user_id)],
+            )
+            # upsert 키는 안정 식별자(platform_user_id) — username 은 변경/탈취 가능이라
+            # 식별에 쓰지 않고 표시·판정용으로 매 연동 갱신만 한다(1차 적대 리뷰 High-5)
+            existing = (
+                await SnsAccount.filter(
+                    user_id=user.id,
+                    platform=Platform.threads,
+                    platform_user_id=platform_user_id,
+                )
+                .select_for_update()
+                .first()
+            )
+            if existing is not None:
+                await SnsAccountSecret.filter(account_id=existing.id).update(
+                    encrypted_credentials=ciphertext
+                )
+                if not await SnsAccountSecret.filter(account_id=existing.id).exists():
+                    await SnsAccountSecret.create(
+                        account=existing, encrypted_credentials=ciphertext
+                    )
+                existing.status = AccountStatus.active
+                existing.token_expires_at = expires_at
+                existing.platform_username = username
+                if body.display_name:
+                    existing.display_name = body.display_name
+                await existing.save(
+                    update_fields=[
+                        "status", "token_expires_at", "platform_username", "display_name",
+                    ]
+                )
+                return _out(existing)
+            account = await SnsAccount.create(
+                user=user,
+                platform=Platform.threads,
+                display_name=body.display_name or username,
+                platform_username=username,
+                platform_user_id=platform_user_id,
+                token_expires_at=expires_at,
+            )
+            await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
+    except IntegrityError as exc:
+        # 부분 unique(신원) 백스톱 등 잔여 경합 — 롤백으로 부분 반영 없음
+        raise HTTPException(
+            status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
+        ) from exc
+    return _out(account)
