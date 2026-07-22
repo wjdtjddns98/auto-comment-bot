@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getHealth } from "../lib/apiClient";
 import { useAuth } from "../hooks/useAuth";
@@ -35,7 +35,9 @@ export function Layout() {
   return (
     <div className="min-h-screen">
       <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-gray-200 bg-white px-6 py-3">
-        <strong className="whitespace-nowrap text-gray-900">SNS 키워드 모니터</strong>
+        <Link to="/" className="whitespace-nowrap font-bold text-gray-900 hover:text-brand-600">
+          SNS 키워드 모니터
+        </Link>
         <nav className="flex flex-wrap gap-x-1 gap-y-1 text-sm text-gray-600">
           {visibleLinks.map((link) => (
             <NavLink
