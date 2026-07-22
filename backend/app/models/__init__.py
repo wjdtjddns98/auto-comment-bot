@@ -129,8 +129,8 @@ class Keyword(Model):
     pattern = fields.CharField(max_length=512)
     match_type = fields.CharEnumField(MatchType, max_length=16, default=MatchType.substring)
     enabled = fields.BooleanField(default=True)
-    # null = 전체 소스 대상. RESTRICT: 스코프된 키워드가 있는 소스는 삭제 불가
-    # (소스 삭제가 키워드를 조용히 연쇄 삭제하지 않게).
+    # null = 전체 소스 대상. RESTRICT: DB 레벨 백스톱 — 소스 삭제는 API 경로에서만
+    # 스코프 키워드를 함께 정리한다(sources.py, 제품 결정 2026-07-22). 전역 키워드는 무관.
     source_scope = fields.ForeignKeyField(
         "models.Source", related_name="keywords", null=True, on_delete=fields.RESTRICT
     )
@@ -142,7 +142,8 @@ class Keyword(Model):
 
 class MatchedPost(Model):
     id = fields.IntField(primary_key=True)
-    # RESTRICT: 매칭 이력이 있는 소스는 삭제 불가(감사 보호) — 비활성화(enabled=False)가 정식 경로.
+    # RESTRICT: DB 레벨 백스톱 — 소스 삭제 API 가 명시 순서(이력→매칭→소스)로만 지울 수
+    # 있게 한다. 실발송(sent)·전송 진행 중 매칭이 있으면 API 가 409(감사 보호, sources.py).
     source = fields.ForeignKeyField(
         "models.Source", related_name="matched_posts", on_delete=fields.RESTRICT
     )

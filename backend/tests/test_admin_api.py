@@ -11,8 +11,10 @@ from app.auth import hash_password
 from app.config import settings
 from app.models import (
     AccountStatus,
+    Keyword,
     MatchedPost,
     Platform,
+    PostStatus,
     ReplyAction,
     ReplyActionLog,
     Role,
@@ -283,39 +285,84 @@ async def test_patch_explicit_null_422(admin_session):
     await client.delete(f"/api/keywords/{kid}", headers=csrf)
 
 
-async def test_delete_preserves_match_history(admin_session):
-    """감사 보호: 소스 삭제는 이력 있으면 409(RESTRICT), 키워드 삭제는 이력 보존(SET NULL)."""
+async def test_delete_source_cascades_collection(admin_session):
+    """소스 삭제는 수집물(매칭·비발송 이력)과 스코프 키워드를 함께 정리한다(제품 결정
+    2026-07-22 — 원클릭 삭제 UX). 전역 키워드는 남는다. 키워드 삭제는 이력 보존(SET NULL)."""
     client, csrf = admin_session
+    me = (await client.get("/api/auth/me")).json()
     src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
-    kw = (await client.post("/api/keywords", json={"pattern": "키워드"}, headers=csrf)).json()
+    global_kw = (await client.post("/api/keywords", json={"pattern": "전역"}, headers=csrf)).json()
+    scoped_kw = (
+        await client.post(
+            "/api/keywords", json={"pattern": "스코프", "source_scope": src["id"]}, headers=csrf
+        )
+    ).json()
     post = await MatchedPost.create(
         source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}",
-        content="본문", matched_keyword_id=kw["id"],
+        content="본문", matched_keyword_id=global_kw["id"],
+    )
+    await ReplyActionLog.create(
+        matched_post=post, reviewer_id=me["id"], final_body="복사 본문",
+        action=ReplyAction.approved,
     )
     try:
         r = await client.delete(f"/api/sources/{src['id']}", headers=csrf)
-        assert r.status_code == 409
-
-        assert (await client.delete(f"/api/keywords/{kw['id']}", headers=csrf)).status_code == 204
-        await post.refresh_from_db()
-        assert post.matched_keyword_id is None  # 이력 행 생존 + 참조만 해제
+        assert r.status_code == 204
+        assert await MatchedPost.get_or_none(id=post.id) is None
+        assert await ReplyActionLog.filter(matched_post_id=post.id).count() == 0
+        assert await Keyword.get_or_none(id=scoped_kw["id"]) is None  # 스코프 키워드 정리
+        assert await Keyword.get_or_none(id=global_kw["id"]) is not None  # 전역은 생존
     finally:
-        await post.delete()
+        await ReplyActionLog.filter(matched_post_id=post.id).delete()
+        await MatchedPost.filter(id=post.id).delete()
+        await Keyword.filter(id__in=[global_kw["id"], scoped_kw["id"]]).delete()
         await Source.filter(id=src["id"]).delete()
 
 
-async def test_delete_source_with_scoped_keyword_409(admin_session):
-    # 소스 삭제가 스코프된 키워드를 조용히 연쇄 삭제하지 않는다 (RESTRICT → 409)
+async def test_delete_source_with_sent_history_409(admin_session):
+    """실발송 증거·조정 재료는 불가침(불변식 ②) — sent·unknown 이력 또는 전송 진행 중
+    매칭이 있으면 소스 삭제 409(부분 삭제 없음), enabled=false 비활성화가 정식 경로."""
     client, csrf = admin_session
+    me = (await client.get("/api/auth/me")).json()
     src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
-    kw = (
+    scoped_kw = (
         await client.post(
-            "/api/keywords", json={"pattern": "키워드", "source_scope": src["id"]}, headers=csrf
+            "/api/keywords", json={"pattern": "스코프", "source_scope": src["id"]}, headers=csrf
         )
     ).json()
-    assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
-    assert (await client.delete(f"/api/keywords/{kw['id']}", headers=csrf)).status_code == 204
-    assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 204
+    post = await MatchedPost.create(
+        source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}",
+        content="본문", status=PostStatus.replied,
+    )
+    await ReplyActionLog.create(
+        matched_post=post, reviewer_id=me["id"], final_body="발송 본문",
+        action=ReplyAction.sent, external_reply_id="r-live-1",
+    )
+    try:
+        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+        # 보호 검사가 삭제보다 먼저라 아무것도 지워지지 않는다 — 전부 생존
+        assert await MatchedPost.get_or_none(id=post.id) is not None
+        assert await ReplyActionLog.filter(matched_post_id=post.id).count() == 1
+        assert await Keyword.get_or_none(id=scoped_kw["id"]) is not None
+
+        # 전송 진행 중(verify_pending)도 동일 보호 — sent 이력 없이 상태만으로 차단
+        await ReplyActionLog.filter(matched_post_id=post.id).delete()
+        await MatchedPost.filter(id=post.id).update(status=PostStatus.verify_pending)
+        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+
+        # 조정 미게시 판정 후 reviewing 복귀 행(unknown 이력만 존재)도 보호(검증 리뷰
+        # High) — 미게시 판정은 오판일 수 있어(설계 §3.6) 애매한 전송 흔적은 지우지 않는다
+        await MatchedPost.filter(id=post.id).update(status=PostStatus.reviewing)
+        await ReplyActionLog.create(
+            matched_post=post, reviewer_id=me["id"], final_body="발송 본문",
+            action=ReplyAction.unknown, error="결과 불명",
+        )
+        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+    finally:
+        await ReplyActionLog.filter(matched_post_id=post.id).delete()
+        await MatchedPost.filter(id=post.id).delete()
+        await Keyword.filter(id=scoped_kw["id"]).delete()
+        await Source.filter(id=src["id"]).delete()
 
 
 async def test_reply_action_fk_protections(admin_session):
