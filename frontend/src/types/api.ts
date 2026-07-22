@@ -168,3 +168,20 @@ export interface ApproveMatchRequest {
 export type ApproveMatchResponse =
   | { action: "sent"; external_reply_id: string }
   | { action: "approved"; clipboard_body: string };
+
+// --- 사용자 관리 (admin, PRD FR-19) ---
+// ⚠️ docs/API-SPEC.md 에 아직 없는 제안 계약(백엔드 미확정). /api/users 라우터가
+// 실제로 추가되면 이 타입·엔드포인트를 백엔드와 맞춰 확정할 것 — 임의 구현 아님, 확인 필요.
+export interface AdminUser extends User {
+  created_at: string;
+}
+
+export interface CreateUserRequest {
+  email: string;
+  password: string;
+  role: Role;
+}
+
+export interface PatchUserRequest {
+  role?: Role;
+}

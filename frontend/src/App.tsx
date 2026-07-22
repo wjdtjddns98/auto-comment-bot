@@ -9,6 +9,7 @@ import AdminSourcesPage from "./pages/AdminSourcesPage";
 import AdminKeywordsPage from "./pages/AdminKeywordsPage";
 import AdminTemplatesPage from "./pages/AdminTemplatesPage";
 import AdminSnsAccountsPage from "./pages/AdminSnsAccountsPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
 import AuditLogPage from "./pages/AuditLogPage";
 import DebugHealthPage from "./pages/DebugHealthPage";
 
@@ -46,6 +47,14 @@ export default function App() {
           element={
             <AdminRoute>
               <AdminTemplatesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
             </AdminRoute>
           }
         />

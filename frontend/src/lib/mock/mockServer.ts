@@ -2,14 +2,17 @@
 // apiClient.ts 의 request() 가 VITE_USE_MOCK=true 일 때 실제 fetch 대신 이 라우터로 위임한다.
 
 import type {
+  AdminUser,
   ApproveMatchRequest,
   ApproveMatchResponse,
+  CreateUserRequest,
   Health,
   Keyword,
   MatchDetail,
   MatchListResponse,
   MatchedPost,
   MatchedPostStatus,
+  PatchUserRequest,
   ReplyAction,
   Source,
   SnsAccount,
@@ -24,6 +27,7 @@ import {
   MOCK_SOURCES,
   MOCK_TEMPLATES,
   MOCK_USERS,
+  type MockUserRecord,
 } from "./fixtures";
 
 export class MockApiError extends Error {
@@ -64,6 +68,7 @@ const templates = structuredClone(MOCK_TEMPLATES);
 const snsAccounts = structuredClone(MOCK_SNS_ACCOUNTS);
 const matchedPosts = structuredClone(MOCK_MATCHED_POSTS);
 const replyActions = structuredClone(MOCK_REPLY_ACTIONS);
+const users = structuredClone(MOCK_USERS);
 
 function nextId(records: Array<{ id: number }>): number {
   return records.reduce((max, r) => Math.max(max, r.id), 0) + 1;
@@ -77,15 +82,25 @@ function canWrite(sourceId: number): boolean {
   return sources.find((s) => s.id === sourceId)?.type === "threads";
 }
 
-function toPublicUser(record: (typeof MOCK_USERS)[number]): User {
+function toPublicUser(record: MockUserRecord): User {
   return { id: record.id, email: record.email, role: record.role };
+}
+
+function toAdminUser(record: MockUserRecord): AdminUser {
+  return { ...toPublicUser(record), created_at: record.created_at };
 }
 
 function requireUser(): User {
   const id = getSessionUserId();
-  const record = id ? MOCK_USERS.find((u) => u.id === id) : undefined;
+  const record = id ? users.find((u) => u.id === id) : undefined;
   if (!record) throw new MockApiError(401, "인증이 필요합니다.");
   return toPublicUser(record);
+}
+
+function requireAdmin(): User {
+  const user = requireUser();
+  if (user.role !== "admin") throw new MockApiError(403, "관리자만 접근할 수 있습니다.");
+  return user;
 }
 
 function findMatchOr404(id: number): MatchedPost {
@@ -107,7 +122,7 @@ function validateKeywordPattern(pattern: string, matchType: string): void {
 
 function handleLogin(body: unknown): User {
   const { email, password } = (body ?? {}) as { email?: string; password?: string };
-  const record = MOCK_USERS.find((u) => u.email === email && u.password === password);
+  const record = users.find((u) => u.email === email && u.password === password);
   if (!record) throw new MockApiError(401, "이메일 또는 비밀번호가 올바르지 않습니다.");
   setSessionUserId(record.id);
   return toPublicUser(record);
@@ -436,6 +451,74 @@ function handleGetReplyActions(query: MockRequestOptions["query"]): ReplyAction[
   return replyActions.filter((r) => !matchId || r.matched_post_id === matchId);
 }
 
+// ---- 사용자 관리 (admin, 제안 계약 — types/api.ts 주석 참조) ----
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function adminCount(): number {
+  return users.filter((u) => u.role === "admin").length;
+}
+
+function handleGetUsers(): AdminUser[] {
+  requireAdmin();
+  return users.map(toAdminUser);
+}
+
+function handleCreateUser(body: unknown): AdminUser {
+  requireAdmin();
+  const req = (body ?? {}) as Partial<CreateUserRequest>;
+  const email = req.email?.trim() ?? "";
+  if (!EMAIL_RE.test(email)) throw new MockApiError(422, "email: 올바른 이메일 형식이 아닙니다");
+  if (users.some((u) => u.email === email)) throw new MockApiError(422, "email: 이미 사용 중인 이메일입니다");
+  if (!req.password || req.password.length < 8) {
+    throw new MockApiError(422, "password: 8자 이상이어야 합니다");
+  }
+  if (req.role !== "admin" && req.role !== "reviewer") {
+    throw new MockApiError(422, "role: admin 또는 reviewer 여야 합니다");
+  }
+  const record: MockUserRecord = {
+    id: nextId(users),
+    email,
+    password: req.password,
+    role: req.role,
+    created_at: new Date().toISOString(),
+  };
+  users.push(record);
+  return toAdminUser(record);
+}
+
+function handlePatchUser(id: number, body: unknown): AdminUser {
+  const actor = requireAdmin();
+  const record = users.find((u) => u.id === id);
+  if (!record) throw new MockApiError(404, "사용자를 찾을 수 없습니다.");
+  const req = (body ?? {}) as PatchUserRequest;
+  if (req.role !== undefined) {
+    if (req.role !== "admin" && req.role !== "reviewer") {
+      throw new MockApiError(422, "role: admin 또는 reviewer 여야 합니다");
+    }
+    if (record.id === actor.id && req.role !== "admin") {
+      throw new MockApiError(422, "본인의 관리자 권한은 스스로 해제할 수 없습니다.");
+    }
+    if (record.role === "admin" && req.role !== "admin" && adminCount() <= 1) {
+      throw new MockApiError(422, "마지막 관리자의 역할은 변경할 수 없습니다.");
+    }
+    record.role = req.role;
+  }
+  return toAdminUser(record);
+}
+
+function handleDeleteUser(id: number): void {
+  const actor = requireAdmin();
+  const idx = users.findIndex((u) => u.id === id);
+  if (idx === -1) throw new MockApiError(404, "사용자를 찾을 수 없습니다.");
+  const record = users[idx];
+  if (record.id === actor.id) throw new MockApiError(422, "본인 계정은 삭제할 수 없습니다.");
+  if (record.role === "admin" && adminCount() <= 1) {
+    throw new MockApiError(422, "마지막 관리자는 삭제할 수 없습니다.");
+  }
+  users.splice(idx, 1);
+}
+
 // ---- 헬스 ----
 
 function handleHealth(): Health {
@@ -543,6 +626,19 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
   },
 
   { method: "GET", pattern: /^\/api\/reply-actions$/, handler: (_p, q) => handleGetReplyActions(q) },
+
+  { method: "GET", pattern: /^\/api\/users$/, handler: () => handleGetUsers() },
+  { method: "POST", pattern: /^\/api\/users$/, handler: (_p, _q, body) => handleCreateUser(body) },
+  {
+    method: "PATCH",
+    pattern: /^\/api\/users\/(?<id>\d+)$/,
+    handler: (p, _q, body) => handlePatchUser(Number(p.id), body),
+  },
+  {
+    method: "DELETE",
+    pattern: /^\/api\/users\/(?<id>\d+)$/,
+    handler: (p) => handleDeleteUser(Number(p.id)),
+  },
 ];
 
 function matchRoute(
