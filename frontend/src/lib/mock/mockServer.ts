@@ -374,9 +374,22 @@ function handleGetSnsAccounts(): SnsAccount[] {
   return snsAccounts.filter((a) => a.user_id === user.id);
 }
 
+// 플랫폼별 자격증명 형식 검증 — 등록/교체 시점 422(백엔드 _validate_credentials 와 동일 규칙, #34).
+// naver/community 는 어댑터 스키마 확정 시(M3) 추가.
+function validateSnsCredentials(platform: SnsAccount["platform"], credentials: Record<string, unknown> | undefined): void {
+  if (platform !== "threads") return;
+  const token = credentials?.access_token;
+  if (typeof token !== "string" || !token.trim()) {
+    throw new MockApiError(422, "credentials.access_token: threads 계정은 액세스 토큰(문자열)이 필요합니다");
+  }
+}
+
 function handleCreateSnsAccount(body: unknown): SnsAccount {
   const user = requireUser();
-  const req = (body ?? {}) as Pick<SnsAccount, "platform" | "display_name">;
+  const req = (body ?? {}) as Pick<SnsAccount, "platform" | "display_name"> & {
+    credentials?: Record<string, unknown>;
+  };
+  validateSnsCredentials(req.platform, req.credentials);
   // credentials 는 실제로는 서버가 즉시 암호화해 별도 테이블에 저장 — 모의 서버는 아예 보관하지 않는다.
   // 생성 주체에게 자동 귀속(타인 명의 등록 불가) — 소유자 지정 입력 자체가 없다.
   const record: SnsAccount = {
@@ -409,10 +422,7 @@ function handleUpdateSnsAccountCredentials(id: number, body: unknown): void {
     throw new MockApiError(404, "SNS 계정을 찾을 수 없습니다.");
   }
   const req = (body ?? {}) as { credentials?: Record<string, unknown> };
-  const token = req.credentials?.access_token;
-  if (record.platform === "threads" && (typeof token !== "string" || !token.trim())) {
-    throw new MockApiError(422, "credentials.access_token: threads 계정은 액세스 토큰(문자열)이 필요합니다");
-  }
+  validateSnsCredentials(record.platform, req.credentials);
   // credentials 는 실제로는 서버가 즉시 암호화해 재저장 — 모의 서버는 보관하지 않는다.
   record.status = "active";
   record.token_expires_at = null;
