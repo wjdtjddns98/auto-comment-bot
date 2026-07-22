@@ -239,6 +239,16 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       불필요·§3.6 잔여창 폐쇄), 컨테이너 만료(24h)·재호출 불가 시에만 현행 텍스트 판정 폴백.
       §3.5 대안 비교의 확정 서술 참조. 착수 전 FR-13(자동 재시도 금지)과의 정합 —
       사람 재클릭 없는 시점의 외부 write 허용 여부 — 를 명시적으로 결정할 것(독립 리뷰 L2)
+- [ ] R9. **poll↔reconcile 상태 회계 잔여 Medium 2건**(R-2 검증 리뷰, 2026-07-22 —
+      배지 정확도 문제로 발송 안전과 무관, 급하지 않음):
+      ① poll 성공의 `_fail_counts` 무조건 리셋 — 조정 지속 실패(429 포함) 중에도 수집
+      성공마다 카운터가 0 이 되어 지수 backoff 가 최소치(60초)에서 재시작(불변식 ④ 약화)
+      + `_DOWN_AFTER_FAILURES` 미도달/down→degraded 역전 가능. 최소안: `_reconcile_failing`
+      소스는 pop 생략, 정석: poll/reconcile 실패 카운터 분리.
+      ② `_settle_sent` 예외 재raise 시 해당 틱 outcome 미집계 — 조회는 성공했는데
+      `_reconcile_failing` 해제가 기존 플래그 유무에 따라 지연되는 이력 의존 동작.
+      최소안: 호출부 try/except 로 로그 후 "fetch_ok" 반환(롤백·verify_pending 유지 그대로라
+      전송 안전성 불변) + 회귀 테스트(기존 플래그 + non-sent IntegrityError → 해제 확인).
 
 ## 참고 문서
 
