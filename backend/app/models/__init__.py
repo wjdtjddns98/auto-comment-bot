@@ -78,8 +78,9 @@ class SnsAccount(Model):
     user = fields.ForeignKeyField("models.User", related_name="sns_accounts")
     platform = fields.CharEnumField(Platform, max_length=16)
     display_name = fields.CharField(max_length=255)
-    # 플랫폼 계정 username — 조정 잡의 "우리 답글" 판정 키. 계정 등록·토큰 갱신 시점에
-    # 확보해 저장한다(조회 시점 확보는 토큰 만료 시 판정 불능 — M2 조정 설계 §3.1).
+    # 플랫폼 계정 username — 조정 잡의 "우리 답글" 판정 키(live). 계정 등록 시점에 확보하고
+    # write 어댑터가 **매 전송 직전** 갱신한다(threads.py, 2차 리뷰 중요-1). 조정은 이 live
+    # 값과 verify_meta.platform_username 스냅샷을 둘 다 후보로 쓴다(reconcile.py).
     platform_username = fields.CharField(max_length=255, null=True)
     token_expires_at = fields.DatetimeField(null=True)
     status = fields.CharEnumField(AccountStatus, max_length=16, default=AccountStatus.active)
@@ -159,7 +160,8 @@ class MatchedPost(Model):
     status = fields.CharEnumField(PostStatus, max_length=16, default=PostStatus.new)
     sending_claimed_at = fields.DatetimeField(null=True)  # sweep 회수용 (MUST-FIX #4)
     # 조정 재료(M2 조정 설계 §3.1) — CAS 클레임 시 기록, 종결 시 null 청소. 비밀 없음.
-    # {target_media_id, claim_ts, attempts, reviewer_id, final_body, sns_account_id, container_id?}
+    # {target_media_id, claim_ts, attempts, reviewer_id, final_body, sns_account_id,
+    #  container_id?, platform_username?(결과 불명 시점 판정 키 스냅샷 — 교체 오염 방지)}
     verify_meta = fields.JSONField(null=True)
 
     class Meta:

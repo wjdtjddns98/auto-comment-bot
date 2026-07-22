@@ -334,3 +334,50 @@ async def test_reconcile_no_username_stays_for_human(verify_pending_match, monke
     await match.refresh_from_db()
     assert match.status == PostStatus.verify_pending
     assert adapter.fetch_calls == 0  # 판정 불능이면 조회 자체를 하지 않는다
+
+
+@pytest.mark.db
+async def test_reconcile_checks_username_snapshot_when_live_swapped(verify_pending_match, monkeypatch):
+    """판정 후보에 결과 불명 시점 스냅샷 포함(토큰 교체 API 3차 독립 리뷰 blocker) —
+    조정 전에 자격증명이 다른 신원으로 교체(live username 변경)돼도 실제 게시를 찾는다.
+    live 값만 썼다면 미발견→미게시 오판→retry→이중 게시가 됐을 시나리오다."""
+    from app import sources as sources_registry
+
+    match, user, account, body = verify_pending_match
+    meta = dict(match.verify_meta)
+    meta["platform_username"] = "our_bot"  # 전송 시도 시점의 신원 스냅샷
+    await MatchedPost.filter(id=match.id).update(verify_meta=meta)
+    # 조정 전에 토큰 교체로 계정의 live 신원이 바뀐 상황
+    await SnsAccount.filter(id=account.id).update(platform_username="other_account")
+    await match.refresh_from_db()
+    await match.fetch_related("source")
+    adapter = FakeVerifyAdapter(replies=[_reply(body)])  # 실제 게시된 답글(옛 신원)
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_post(match)
+
+    await match.refresh_from_db()
+    assert match.status == PostStatus.replied
+
+
+@pytest.mark.db
+async def test_reconcile_checks_live_username_when_snapshot_stale(verify_pending_match, monkeypatch):
+    """판정 후보에 live 값도 포함(4차 검증 리뷰 Medium) — 핸들 변경(rename)으로 스냅샷이
+    stale 이고 /replies 가 과거 답글에 현재 핸들을 반환하는 계약이어도 실제 게시를 찾는다.
+    스냅샷만 썼다면 미발견→미게시 오판→retry→이중 게시가 됐을 시나리오다."""
+    from app import sources as sources_registry
+
+    match, user, account, body = verify_pending_match
+    meta = dict(match.verify_meta)
+    meta["platform_username"] = "old_handle"  # 전송 시점 스냅샷 — 이후 rename 으로 stale
+    await MatchedPost.filter(id=match.id).update(verify_meta=meta)
+    await match.refresh_from_db()
+    await match.fetch_related("source")
+    # 실제 게시된 답글이 현재 핸들(our_bot=live 픽스처 값)로 조회되는 상황
+    adapter = FakeVerifyAdapter(replies=[_reply(body)])
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_post(match)
+
+    await match.refresh_from_db()
+    assert match.status == PostStatus.replied

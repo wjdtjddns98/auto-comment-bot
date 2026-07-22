@@ -281,6 +281,14 @@ async def _approve(
         error_text = _safe_error(exc, match_id)
         if isinstance(exc, SendOutcomeUnknown) and exc.container_id:
             verify_meta["container_id"] = exc.container_id
+        # 판정 키 스냅샷(토큰 교체 API 3차 독립 리뷰 blocker): 이 시도를 수행한 계정의
+        # username 을 결과 불명 시점에 고정한다 — 이후 자격증명 교체(신원 교체)가 조정
+        # 판정을 오염시켜 "실제 게시됨"을 미게시로 오판(→retry→이중 게시)하는 경로 차단.
+        # send_reply 는 publish 전에 platform_username 을 갱신·저장하므로(2차 리뷰 중요-1)
+        # 이 in-memory 값이 곧 이번 시도의 게시 신원이다. 갱신 전에 취소/실패했다면
+        # 게시 자체가 없었으므로 이전 값이어도 판정 결과(미발견→미게시)가 옳다.
+        if account is not None and account.platform_username:
+            verify_meta["platform_username"] = account.platform_username
         async with in_transaction():
             await _log(action=ReplyAction.unknown, error=error_text)
             fenced = await _fenced().update(
