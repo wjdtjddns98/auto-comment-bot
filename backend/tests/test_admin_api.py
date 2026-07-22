@@ -10,6 +10,7 @@ from app import crypto
 from app.auth import hash_password
 from app.config import settings
 from app.models import (
+    AccountStatus,
     MatchedPost,
     Platform,
     ReplyAction,
@@ -413,6 +414,107 @@ async def test_sns_account_secret_never_in_responses(admin_session, monkeypatch)
     assert (await client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)).status_code == 204
     assert await SnsAccountSecret.get_or_none(account_id=account_id) is None
     assert await SnsAccount.get_or_none(id=account_id) is None
+
+
+async def test_sns_account_credentials_replace(admin_session, monkeypatch):
+    """토큰 교체(PUT /credentials): 삭제→재등록 없이 자격증명만 교체 + 만료 상태 복구.
+    등록과 동일한 형식 검증(422)·자격증명 비노출(불변식 ③)·결손 secret 복구(upsert)."""
+    client, csrf = admin_session
+    monkeypatch.setattr(settings, "credentials_fernet_keys", Fernet.generate_key().decode())
+    old_token = f"tok-OLD-{uuid.uuid4().hex}"
+    r = await client.post(
+        "/api/sns-accounts",
+        json={"platform": "threads", "display_name": "교체대상",
+              "credentials": {"access_token": old_token}},
+        headers=csrf,
+    )
+    assert r.status_code == 201
+    account_id = r.json()["id"]
+    # 만료된 계정 시나리오 — 교체가 active 로 복구해야 새 토큰이 실제로 쓰인다
+    await SnsAccount.filter(id=account_id).update(status=AccountStatus.expired)
+
+    new_token = f"tok-NEW-{uuid.uuid4().hex}"
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": new_token}},
+        headers=csrf,
+    )
+    assert r.status_code == 204
+    secret = await SnsAccountSecret.get(account_id=account_id)
+    assert crypto.decrypt_credentials(bytes(secret.encrypted_credentials)) == {
+        "access_token": new_token
+    }
+    account = await SnsAccount.get(id=account_id)
+    assert account.status == AccountStatus.active
+    assert account.token_expires_at is None
+
+    # CSRF 없이 거부 — 상태변경 라우트 공통 정책(NFR-S4)
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": "tok-nocsrf"}},
+    )
+    assert r.status_code == 403
+
+    # 등록과 동일한 형식 검증 + 에러에 입력 echo 없음(불변식 ③)
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": "  "}},
+        headers=csrf,
+    )
+    assert r.status_code == 422
+    leaked = f"LEAK-{uuid.uuid4().hex}"
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": leaked},
+        headers=csrf,
+    )
+    assert r.status_code == 422 and leaked not in r.text
+
+    # 결손 secret(과거 데이터) 도 교체가 복구한다 — upsert
+    await SnsAccountSecret.filter(account_id=account_id).delete()
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": new_token}},
+        headers=csrf,
+    )
+    assert r.status_code == 204
+    assert await SnsAccountSecret.get_or_none(account_id=account_id) is not None
+
+    assert (await client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)).status_code == 204
+
+
+async def test_sns_account_credentials_replace_scoped_to_owner(admin_session, monkeypatch):
+    """타인 계정 토큰 교체는 존재 여부도 노출하지 않는다(404) — delete 와 동일 정책."""
+    client, csrf = admin_session
+    monkeypatch.setattr(settings, "credentials_fernet_keys", Fernet.generate_key().decode())
+    owner_token = f"tok-OWNER-{uuid.uuid4().hex}"
+    r = await client.post(
+        "/api/sns-accounts",
+        json={"platform": "threads", "display_name": "admin계정",
+              "credentials": {"access_token": owner_token}},
+        headers=csrf,
+    )
+    account_id = r.json()["id"]
+    reviewer = await _make_user(Role.reviewer)
+    try:
+        # 같은 클라이언트로 reviewer 재로그인 — 이후 요청은 reviewer 권한
+        await client.post(
+            "/api/auth/login", json={"email": reviewer.email, "password": PASSWORD}
+        )
+        r_csrf = {"X-CSRF-Token": (await client.get("/api/auth/csrf")).json()["csrf_token"]}
+        r = await client.put(
+            f"/api/sns-accounts/{account_id}/credentials",
+            json={"credentials": {"access_token": "tok-hijack"}},
+            headers=r_csrf,
+        )
+        assert r.status_code == 404
+        # 원 자격증명은 그대로다
+        secret = await SnsAccountSecret.get(account_id=account_id)
+        assert crypto.decrypt_credentials(bytes(secret.encrypted_credentials)) == {
+            "access_token": owner_token
+        }
+    finally:
+        await reviewer.delete()
 
 
 async def test_sns_account_without_key_503(admin_session, monkeypatch):

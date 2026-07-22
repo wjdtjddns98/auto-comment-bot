@@ -11,6 +11,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from app import crypto
@@ -36,6 +37,10 @@ class SnsAccountOut(BaseModel):
 class SnsAccountIn(BaseModel):
     platform: Platform
     display_name: str = Field(min_length=1, max_length=255)
+    credentials: dict[str, Any]
+
+
+class CredentialsIn(BaseModel):
     credentials: dict[str, Any]
 
 
@@ -92,6 +97,50 @@ async def create_account(
         )
         await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
     return _out(account)
+
+
+@router.put(
+    "/{account_id}/credentials", status_code=204, dependencies=[Depends(require_csrf)]
+)
+async def replace_credentials(
+    account_id: int, body: CredentialsIn, user: Annotated[User, Depends(current_user)]
+) -> None:
+    """토큰 교체 — 삭제→재등록→소스 재연결 루프 제거(M2 백로그 ①).
+
+    등록과 동일한 형식 검증(422)·암호화 실패 처리(503). 교체 성공 시 만료/회수 상태를
+    active 로 복구한다 — 새 토큰이 유효하지 않으면 이후 수집/전송 시점에 다시 상태
+    회계가 이뤄지므로 이전 상태를 남길 이유가 없다. platform 은 저장된 계정 값을 쓴다
+    (경로로 platform 전환 불가)."""
+    account = await visible_accounts(user).filter(id=account_id).first()
+    if account is None:
+        # 타인 계정은 존재 여부도 노출하지 않는다(404) — delete 와 동일 정책
+        raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
+    _validate_credentials(account.platform, body.credentials)
+    try:
+        ciphertext = crypto.encrypt_credentials(body.credentials)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
+        ) from exc
+    try:
+        async with in_transaction():
+            updated = await SnsAccountSecret.filter(account_id=account.id).update(
+                encrypted_credentials=ciphertext
+            )
+            if not updated:
+                # 등록 경로는 secret 을 항상 만들지만, 결손 데이터도 교체가 복구한다(upsert)
+                await SnsAccountSecret.create(
+                    account=account, encrypted_credentials=ciphertext
+                )
+            account.status = AccountStatus.active
+            account.token_expires_at = None
+            await account.save(update_fields=["status", "token_expires_at"])
+    except IntegrityError as exc:
+        # 삭제/동시 교체와의 미시적 경합 — 트랜잭션 롤백으로 부분 반영 없음
+        raise HTTPException(
+            status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
+        ) from exc
 
 
 @router.delete("/{account_id}", status_code=204, dependencies=[Depends(require_csrf)])

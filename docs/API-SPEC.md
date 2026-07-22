@@ -97,6 +97,16 @@ Req `{ platform, display_name, credentials: {...} }` → 201 `{ id, user_id, pla
   문자열) 필수 — 누락/오형식이면 `422 { detail: "credentials.access_token: ..." }`(입력값 echo 없음).
   FE 는 threads 선택 시 토큰 입력칸 하나만 노출하고 `{"access_token": <값>}` 으로 조립 권장(#32).
 
+### `PUT /api/sns-accounts/{id}/credentials` (CSRF 필수) — 토큰 교체 (M2)
+Req `{ credentials: {...} }` → 204 (본문 없음).
+→ **삭제→재등록→소스 재연결 없이** 자격증명만 교체한다(토큰 만료/재발급 대응).
+→ 등록과 동일한 플랫폼별 형식 검증: `threads` 는 `credentials.access_token`(비어 있지 않은
+  문자열) 필수 — 누락/오형식 422(입력값 echo 없음). platform 은 저장된 계정 값 기준(전환 불가).
+→ 교체 성공 시 `status` 가 `active` 로 복구되고 `token_expires_at` 은 null 로 초기화 —
+  새 토큰이 무효하면 이후 수집/전송 시점에 다시 상태 회계가 이뤄진다.
+→ 본인 계정만(admin 은 전체) · 타인 것은 404 · 암호화 키 미설정 503(등록과 동일) ·
+  삭제와의 동시 경합은 409(재시도 안내).
+
 ### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
 
 ---
