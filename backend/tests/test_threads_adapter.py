@@ -56,6 +56,11 @@ def test_threads_config_schema():
         threads.ThreadsConfig(query="q", sns_account_id=1, extra="x")  # 미지 키
 
 
+def test_publish_retry_delays_value():
+    """운영 재시도 지연값 회귀 가드 — 2s+4s(+6s 예산, 근거는 threads.py 상수 주석)."""
+    assert threads._PUBLISH_RETRY_DELAYS == (2.0, 4.0)
+
+
 def test_error_summary_excludes_meta_message():
     """Meta 에러 JSON 의 message(요청 원문 echo 가능)는 요약에 싣지 않는다(불변식 ③)."""
     resp = httpx.Response(
@@ -236,6 +241,122 @@ async def test_publish_200_without_id_is_unknown(threads_setup, monkeypatch):
     with pytest.raises(SendOutcomeUnknown) as exc_info:
         await ADAPTER.send_reply(source, post, "안녕하세요", account)
     assert exc_info.value.container_id == "C1"
+
+
+@db
+async def test_publish_not_ready_retries_same_container(threads_setup, monkeypatch):
+    """생성 직후 400 code=24(컨테이너 준비 전) → 같은 creation_id 로 재시도해 성공.
+    재호출은 idempotent 라 이중 게시 경로가 없다(R3 실측 2026-07-22, 설계 §1)."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    publish_responses = [
+        (400, {"error": {"code": 24, "type": "OAuthException"}}),
+        (200, {"id": "M1"}),
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1.0/me":
+            return httpx.Response(200, json={"id": "u1", "username": "our_bot"})
+        if request.url.path == "/v1.0/me/threads":
+            return httpx.Response(200, json={"id": "C1"})
+        status, body = publish_responses.pop(0)
+        return httpx.Response(status, json=body)
+
+    def _mock_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=threads._API, timeout=1.0, transport=httpx.MockTransport(handler)
+        )
+
+    monkeypatch.setattr(threads, "_client", _mock_client)
+    media_id = await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert media_id == "M1"
+    # 컨테이너 생성은 1회뿐 — 재시도는 같은 creation_id 의 publish 재호출로만
+    assert sum(1 for r in requests if r.url.path == "/v1.0/me/threads") == 1
+    publishes = [r for r in requests if r.url.path == "/v1.0/me/threads_publish"]
+    assert len(publishes) == 2
+    assert all((r.content or b"") == b"creation_id=C1" for r in publishes)  # 정확 일치
+
+
+@db
+async def test_publish_not_ready_exhausted_is_unknown(threads_setup, monkeypatch):
+    """재시도 소진까지 400 code=24 → 결과 불명(SendOutcomeUnknown, container_id 보존).
+    "리소스 없음 = 발행 미수행"은 N=1 관찰일 뿐이라 확정 실패로 좁히지 않는다 —
+    확정이면 verify_meta 폐기 후 새 컨테이너 재시도로 이중 게시 경로가 열린다
+    (독립 리뷰 blocker 반영). 조정 안전망(§3.4)이 받는다."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    rec = Recorder({
+        ("GET", "/v1.0/me"): (200, {"id": "u1", "username": "our_bot"}),
+        ("POST", "/v1.0/me/threads"): (200, {"id": "C1"}),
+        ("POST", "/v1.0/me/threads_publish"):
+            (400, {"error": {"code": 24, "type": "OAuthException"}}),
+    })
+    rec.install(monkeypatch)
+    with pytest.raises(SendOutcomeUnknown) as exc_info:
+        await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert exc_info.value.container_id == "C1"  # 조정 재료 보존
+    assert sum(1 for r in rec.requests if r.url.path == "/v1.0/me/threads_publish") == 3
+    assert TOKEN not in str(exc_info.value)
+
+
+@db
+async def test_publish_retry_then_transport_error_is_unknown(threads_setup, monkeypatch):
+    """재시도 도중(1차 24 이후) 커넥션 오류 → 결과 불명 + container_id 보존."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    publish_results = [(400, {"error": {"code": 24, "type": "OAuthException"}}),
+                       httpx.ReadTimeout("timeout")]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/me":
+            return httpx.Response(200, json={"id": "u1", "username": "our_bot"})
+        if request.url.path == "/v1.0/me/threads":
+            return httpx.Response(200, json={"id": "C1"})
+        result = publish_results.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return httpx.Response(result[0], json=result[1])
+
+    def _mock_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=threads._API, timeout=1.0, transport=httpx.MockTransport(handler)
+        )
+
+    monkeypatch.setattr(threads, "_client", _mock_client)
+    with pytest.raises(SendOutcomeUnknown) as exc_info:
+        await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert exc_info.value.container_id == "C1"
+
+
+@db
+async def test_publish_retry_then_definite_400_is_definite(threads_setup, monkeypatch):
+    """재시도 도중 24 → 190(OAuth 만료) 전환 — 재시도를 멈추고 확정 실패로 분류한다."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    publish_results = [(400, {"error": {"code": 24, "type": "OAuthException"}}),
+                       (400, {"error": {"code": 190, "type": "OAuthException"}})]
+    calls = {"publish": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1.0/me":
+            return httpx.Response(200, json={"id": "u1", "username": "our_bot"})
+        if request.url.path == "/v1.0/me/threads":
+            return httpx.Response(200, json={"id": "C1"})
+        calls["publish"] += 1
+        status, body = publish_results.pop(0)
+        return httpx.Response(status, json=body)
+
+    def _mock_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=threads._API, timeout=1.0, transport=httpx.MockTransport(handler)
+        )
+
+    monkeypatch.setattr(threads, "_client", _mock_client)
+    with pytest.raises(SendError):
+        await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert calls["publish"] == 2  # 190 에서 재시도 중단
 
 
 @db

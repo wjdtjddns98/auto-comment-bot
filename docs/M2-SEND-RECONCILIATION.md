@@ -5,17 +5,18 @@
 > 유지하되, 타임아웃/응답유실 시 **조정(reconciliation)으로 실제 게시 여부를 확인한 뒤에만**
 > 수동 재시도를 허용하는 절차를 M2 write 어댑터와 함께 구현한다.
 
-## 1. OQ-1 조사 결과 (2026-07-21 기준)
+## 1. OQ-1 조사 결과 (2026-07-21 조사 · 2026-07-22 R3 실측 반영)
 
 | 질문 | 결론 | 근거 |
 |---|---|---|
 | 게시 idempotency-key 지원? | **미지원** | 공식 문서(Posts·Create Replies)에 idempotency/중복 방지 파라미터 언급 없음. 서드파티 API 평가(APIs.io)도 idempotency 0/9 |
 | 게시 플로우 | 2단계: `POST /{user_id}/threads`(컨테이너 생성, 답글이면 `reply_to_id` 포함) → `POST /{user_id}/threads_publish`(발행, `creation_id`) | 공식 Posts/Create Replies 문서. 발행 성공 시 Threads Media ID 반환 |
 | 컨테이너 수명 | **24시간 후 만료**. 발행 전 평균 30초 대기 권장 | 공식 문서 + 커뮤니티 구현체 다수 |
-| 이미 발행된 컨테이너에 `threads_publish` 재호출 | **문서화 안 됨** — 같은 media id 반환인지 에러인지 불명. M2 구현 시 실측 후 이 문서 갱신 | (실측 항목 §4-R3) |
-| 게시된 답글 조회 | `GET /{media_id}/replies`·`GET /{media_id}/conversation` — 필드 `id, username, text, timestamp, is_reply, replied_to, root_post, permalink` 등, cursor 페이지네이션(`reverse` 기본 true) | 공식 Reply Management 레퍼런스 |
+| 생성 직후 즉시 publish 가능? | **거부될 수 있음** — 즉시 호출은 400 `code=24`(subcode 4279009, "미디어를 찾을 수 없음", `is_transient=false`)를 관찰. **3초 뒤 같은 creation_id 로 성공**(텍스트 기준 — 30초 권장치는 미디어 처리 대비 보수치로 해석). **code 24 를 발행 미수행의 보장으로 삼지는 않는다**(1회 관찰·특정 subcode 기준 — 공식 계약 아님, 독립 리뷰 반영): 어댑터는 짧은 재시도 후 소진 시 **결과 불명**으로 분류해 조정(§3.4)에 넘긴다 | R3 실측 2026-07-22 |
+| 이미 발행된 컨테이너에 `threads_publish` 재호출 | **HTTP 200 + 같은 media id 반환(에러 아님 — 사실상 idempotent).** 새 글이 생기지 않고 답글 쿼터도 재소비되지 않음(재호출 후 `reply_quota_usage` 불변 교차 확인). 관찰은 발행 직후(수 초~수 분) 재호출 1회 기준 — 24h 컨테이너 수명 내에서만 의미 | R3 실측 2026-07-22 (§4-R3) |
+| 게시된 답글 조회 | `GET /{media_id}/replies`·`GET /{media_id}/conversation` — 필드 `id, username, text, timestamp, is_reply, replied_to, root_post, permalink` 등, cursor 페이지네이션(`reverse` 기본 true). **`limit=100` 허용 실측 확인**(400 아님 — 2차 리뷰 사소-3 해소) | 공식 Reply Management 레퍼런스 + R3 실측 2026-07-22 |
 | "내가 쓴 답글" 전용 목록 | 전용 엔드포인트 **없음** → 조정은 대상 글 기준(`/{media_id}/replies`)으로 수행 | 공식 레퍼런스에 부재 |
-| rate limit | 게시 250건/24h(포스트 기준, 문서 명시). 답글 별도 한도는 레퍼런스에서 재확인 필요 | 공식 Posts 문서 |
+| rate limit | 게시 250건/24h(포스트 기준, 문서 명시). **답글은 별도 한도 1,000건/24h 실측 확인** — `GET /me/threads_publishing_limit?fields=reply_quota_usage,reply_config` 로 사용량 조회 가능(`reply_config: {quota_total: 1000, quota_duration: 86400}`) | 공식 Posts 문서 + R3 실측 2026-07-22 |
 
 **따라서 FR-14 의 "idempotency-key 지원 시 사용" 분기는 성립하지 않는다.** 남는 문제는
 "타임아웃=미전송 처리(at-most-once)" 가정이 틀리는 창 — publish 요청이 실제로는 처리됐는데
@@ -156,10 +157,14 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 
 ### 3.5 왜 이 설계인가 (대안 비교)
 
-- **컨테이너 ID 재사용 재시도**(publish 만 재호출): 발행 성공 여부를 모르는 채 재호출하는
-  것이므로, 재호출 의미론이 문서화되지 않은 현재로선 도박이다. R3 실측에서 "이미 발행된
-  컨테이너 재발행 = 같은 media id 반환(에러 아님)"이 확인되면 **조정 1차 수단으로 승격**할 수
-  있다(그 경우 사실상의 idempotency 확보 — 이 문서 갱신 후 적용, §3.6 잔여창도 닫힌다).
+- **컨테이너 ID 재사용 재시도**(publish 만 재호출): R3 실측(2026-07-22)으로 "이미 발행된
+  컨테이너 재발행 = HTTP 200 + 같은 media id(쿼터 재소비 없음)"가 **확인됐다** — 같은
+  creation_id 에 대한 publish 는 사실상 idempotent 다. 따라서 **조정 1차 수단으로 승격
+  가능**: verify_meta 의 container_id 로 publish 를 재호출하면 이미 발행된 경우 같은
+  media id 를 돌려받아(외부 조회·텍스트 판정 없이) sent 확정할 수 있고, 미발행이었다면
+  사람이 승인한 그 전송이 그대로 완료된다(새 전송 아님 — FR-13 충돌 없음). 적용은 후속
+  구현(§4-R8) — 적용 시 §3.6 잔여창이 닫힌다. 한계: 컨테이너 24h 만료 후에는 불가하므로
+  텍스트 판정(§3.4)은 폴백으로 유지한다.
 - **자동 재전송**: FR-13(자동 재시도 금지) 위반. 채택 불가. (조정 잡의 sent/failed 기록은
   이미 사람이 승인한 전송의 **사후 회계**이지 재전송이 아니다 — FR-13 과 충돌 없음.)
 - **사람에게 "직접 확인 후 재시도" 안내만**: 절차가 사람 기억에 의존 — 구조적 방어(불변식 ②)
@@ -177,8 +182,8 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 
 완화:
 - 미게시 판정 후 FE 에 "재시도 전 대상 글 직접 확인 권장" 표시 — 사람이 최종 방어선.
-- R3 실측으로 컨테이너 재발행 idempotency 가 확인되면 그것을 조정 1차 수단으로 승격(§3.5),
-  텍스트 판정은 보조로 강등 — 이 잔여창이 닫힌다.
+- R3 실측(2026-07-22)으로 컨테이너 재발행 idempotency **확인됨** — 후속 구현(§4-R8)로
+  조정 1차 수단 승격 시 이 잔여창이 닫힌다(24h 만료 전 한정 — 만료 후 폴백은 텍스트 판정).
 - 오탐 방향(같은 계정의 수동 답글을 우리 것으로 오인)은 결과가 "replied 과소 확정"이라 이중
   게시를 만들지는 않으나, R4 테스트에 "수동 답글 혼입" 케이스를 포함한다.
 
@@ -190,12 +195,12 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 - [x] R2. `SendOutcomeUnknown` 계약(publish 5xx/408/409 포함 — §3.2 분류표) + `_approve`/sweep
       분기(`verify_meta` 유무로 verify_pending/reviewing 분기) + 게이트: verify_pending 에서
       approve/retry 409·**ignore 허용**
-- [ ] R3. **실측**: 발행된 컨테이너에 `threads_publish` 재호출 시 동작(및 답글 rate limit 한도)
-      확인 → 본 문서 §1·§3.5 갱신(idempotent 확인 시 조정 1차 수단 승격).
-      프로브 준비됨: `python -m app.cli threads-probe-republish --account-id N --reply-to <media_id>`
-      — **실 토큰 확보(Meta 앱 심사, OQ-2) 후 테스트 계정으로 실행**(실게시 1건 발생).
-      같은 실측에서 `/replies?limit=100` 상한 허용 여부도 확인할 것(어댑터 2차 리뷰 사소-3
-      — 상한이 100 미만이면 조정 조회가 400 반복으로 attempts 동결 limbo)
+- [x] R3. **실측 완료(2026-07-22, 테스트 계정 실게시 1건)**: ① 발행된 컨테이너 재publish =
+      200 + 같은 media id(idempotent, 쿼터 재소비 없음) ② 생성 직후 즉시 publish 는 400
+      code=24(subcode 4279009, 준비 전) 가능 — 3초 뒤 성공 ③ `/replies?limit=100` 허용
+      (사소-3 해소) ④ 답글 쿼터 별도 1,000건/24h. → §1·§3.5·§3.6 갱신 완료. 어댑터에
+      publish code-24 짧은 재시도(같은 creation_id·소진 시 **결과 불명→조정 폴백**) 반영
+      — 24 를 확정 실패로 승격하지 않음(N=1 근거 부족, 독립 리뷰 blocker 반영)
 - [x] R4. 조정 잡(`app/reconcile.py`) + normalize 판정 단위 테스트(수동 답글 혼입·40자 미만
       본문·URL 포함 본문(앞/뒤 위치별)·timestamp 창·절단 prefix 판정 — `tests/test_reconcile.py`.
       동일 본문 답글 다수는 첫 매치 채택 — external_reply_id 오기록 가능성은 §3.6 과 같은
@@ -213,6 +218,11 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
       (fail-safe).
       잔여(후속): OAuth 콜백(API-SPEC §SNS 계정, OQ-2 심사 후), 조정 전용 실패 health 깜빡임
       (2차 리뷰 R-2), 사용자 삭제 기능 도입 시 reviewer FK 방어(R-5)
+- [ ] R8. **조정 1차 수단 승격**(R3 실측 근거): 조정 잡이 verify_meta 의 `container_id` 로
+      `threads_publish` 를 재호출 — 200 + media id 면 그 id 로 즉시 sent 확정(텍스트 판정
+      불필요·§3.6 잔여창 폐쇄), 컨테이너 만료(24h)·재호출 불가 시에만 현행 텍스트 판정 폴백.
+      §3.5 대안 비교의 확정 서술 참조. 착수 전 FR-13(자동 재시도 금지)과의 정합 —
+      사람 재클릭 없는 시점의 외부 write 허용 여부 — 를 명시적으로 결정할 것(독립 리뷰 L2)
 
 ## 참고 문서
 
