@@ -367,3 +367,87 @@ async def probe_republish(account_id: int, reply_to: str, text: str) -> None:
         )
         # 핵심 관찰점: 같은 media id 반환(사실상 idempotent)인가, 에러인가
         print(f"[3] 2차 publish(재호출): HTTP {resp.status_code} → {resp.json()}")
+
+
+# ── OAuth 코드 교환 (앱 심사 — 동의 화면 기반 계정 연동, API-SPEC §SNS 계정) ────────
+
+# 인증 코드 교환/장기 토큰 전환은 v1.0 프리픽스가 아닌 루트 경로 — 공식 계약 그대로.
+_OAUTH_TOKEN_URL = "https://graph.threads.net/oauth/access_token"
+_OAUTH_EXCHANGE_URL = "https://graph.threads.net/access_token"
+# 동의 화면(authorize)은 www.threads.net — FE 가 사용자를 보낼 URL 의 베이스.
+OAUTH_AUTHORIZE_URL = "https://threads.net/oauth/authorize"
+# 신청 권한 전체 — 콘솔 앱 검수 신청 목록과 일치해야 동의 화면에 같은 범위가 뜬다.
+OAUTH_SCOPES = (
+    "threads_basic,threads_keyword_search,threads_content_publish,"
+    "threads_read_replies,threads_manage_replies"
+)
+
+
+class OAuthExchangeError(Exception):
+    """코드→토큰 교환 실패. 메시지는 audit 안전 요약만 — 코드/토큰/시크릿 미포함."""
+
+
+async def oauth_exchange_code(code: str) -> dict:
+    """인증 코드 → 장기(60일) 토큰 + 프로필. 반환:
+    {"access_token": str, "expires_in": int, "user_id": str, "username": str}.
+
+    시크릿/토큰/코드는 응답·예외·로그 어디에도 싣지 않는다(불변식 ③). 장기 토큰
+    전환의 쿼리 파라미터 전달은 공식 계약 — httpx 는 URL 을 로깅하지 않고, 우리
+    로거에도 URL 을 남기지 않는다.
+    """
+    from app.config import settings
+
+    if not (
+        settings.threads_app_id and settings.threads_app_secret and settings.threads_redirect_uri
+    ):
+        raise RuntimeError("Threads OAuth 설정(threads_app_id/secret/redirect_uri) 미설정")
+    async with _client() as client:
+        # 1) 인증 코드 → 단기(1시간) 토큰. 코드는 1회용 — 재사용/만료는 400.
+        resp = await client.post(
+            _OAUTH_TOKEN_URL,
+            data={
+                "client_id": settings.threads_app_id,
+                "client_secret": settings.threads_app_secret,
+                "grant_type": "authorization_code",
+                "redirect_uri": settings.threads_redirect_uri,
+                "code": code,
+            },
+        )
+        if resp.status_code != 200:
+            raise OAuthExchangeError(_error_summary(resp))
+        short_token = resp.json().get("access_token")
+        if not short_token:
+            raise OAuthExchangeError("교환 응답에 access_token 없음")
+
+        # 2) 단기 → 장기(60일) 토큰. 쿼리 파라미터는 공식 계약(위 docstring).
+        resp = await client.get(
+            _OAUTH_EXCHANGE_URL,
+            params={
+                "grant_type": "th_exchange_token",
+                "client_secret": settings.threads_app_secret,
+                "access_token": short_token,
+            },
+        )
+        if resp.status_code != 200:
+            raise OAuthExchangeError(_error_summary(resp))
+        body = resp.json()
+        long_token = body.get("access_token")
+        if not long_token:
+            raise OAuthExchangeError("장기 토큰 응답에 access_token 없음")
+        expires_in = int(body.get("expires_in") or 0)
+
+        # 3) 프로필 확보 — 판정 키(username)와 upsert 식별자.
+        resp = await client.get(
+            f"{_API}/me", params={"fields": "id,username"}, headers=_auth(long_token)
+        )
+        if resp.status_code != 200:
+            raise OAuthExchangeError(_error_summary(resp))
+        me = resp.json()
+        if not me.get("username"):
+            raise OAuthExchangeError("프로필 응답에 username 없음")
+    return {
+        "access_token": long_token,
+        "expires_in": expires_in,
+        "user_id": str(me.get("id") or ""),
+        "username": str(me["username"]),
+    }

@@ -6,8 +6,10 @@ admin 은 운영 파악용으로 전체 조회·삭제 가능. 자격증명은 �
 재노출하지 않는다. read path 는 secret 테이블을 조회조차 하지 않는 전용 스키마
 (MUST-FIX #3, NFR-S1). M2 에서 OAuth 콜백 경로가 이 위에 얹힌다.
 """
-from datetime import datetime
+import logging
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,7 +18,10 @@ from tortoise.transactions import in_transaction
 
 from app import crypto
 from app.api.deps import current_user, require_csrf
+from app.config import settings
 from app.models import AccountStatus, Platform, Role, SnsAccount, SnsAccountSecret, User
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/sns-accounts", tags=["sns-accounts"],
@@ -160,3 +165,115 @@ async def delete_account(
     # secret 은 FK cascade 로 함께 삭제된다. 타인 계정은 존재 여부도 노출하지 않는다(404).
     if not await visible_accounts(user).filter(id=account_id).delete():
         raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
+
+
+# ── Threads OAuth 연동 (동의 화면 기반 — 앱 심사 스크린캐스트 요건) ──────────────────
+
+
+class ThreadsOAuthIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 인증 코드는 1회용·단수명 — 저장하지 않고 즉시 교환만 한다. 응답/로그 echo 금지.
+    code: str = Field(min_length=1)
+    display_name: str | None = Field(default=None, max_length=255)
+
+
+@router.get("/threads-oauth/authorize-url")
+async def threads_authorize_url() -> dict:
+    """FE 가 사용자를 보낼 Threads 동의 화면 URL. 설정 미비면 503(등록 경로와 동일 원칙).
+
+    state 미사용: 콜백은 자동 처리가 아니라 정적 페이지의 코드를 운영자가 직접 대시보드에
+    붙여넣는 수동 운반 경로다 — 세션에 바인딩할 리다이렉트 처리 자체가 없다. 코드의
+    진위는 교환 단계에서 Meta 가 (redirect_uri·client 일치로) 검증한다.
+    """
+    from app.sources.threads import OAUTH_AUTHORIZE_URL, OAUTH_SCOPES
+
+    if not (settings.threads_app_id and settings.threads_redirect_uri):
+        raise HTTPException(
+            status_code=503, detail="Threads OAuth 설정이 없습니다 — 서버 설정 필요"
+        )
+    url = (
+        f"{OAUTH_AUTHORIZE_URL}?client_id={settings.threads_app_id}"
+        f"&redirect_uri={quote(settings.threads_redirect_uri, safe='')}"
+        f"&scope={OAUTH_SCOPES}&response_type=code"
+    )
+    return {"url": url}
+
+
+@router.post("/threads-oauth", status_code=201, dependencies=[Depends(require_csrf)])
+async def threads_oauth_connect(
+    body: ThreadsOAuthIn, user: Annotated[User, Depends(current_user)]
+) -> SnsAccountOut:
+    """인증 코드 → 장기 토큰 교환 → 계정 연동(같은 username 재연동이면 자격증명 교체).
+
+    수동 토큰 등록(POST /)과 대비: 동의 화면을 거치므로 토큰 수명(60일)·만료 시각을
+    알고 저장한다. 교환 실패는 400 고정 메시지(코드 echo 없음 — 불변식 ③).
+    """
+    from app.sources.threads import OAuthExchangeError, oauth_exchange_code
+
+    try:
+        result = await oauth_exchange_code(body.code)
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=503, detail="Threads OAuth 설정이 없습니다 — 서버 설정 필요"
+        ) from exc
+    except OAuthExchangeError as exc:
+        # 요약(HTTP 상태/Meta code)은 서버 로그로만 — 응답은 고정 메시지.
+        logger.warning("Threads OAuth 코드 교환 실패: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="인증 코드가 유효하지 않거나 만료되었습니다 — 다시 연동해 주세요",
+        ) from exc
+    try:
+        ciphertext = crypto.encrypt_credentials({"access_token": result["access_token"]})
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
+        ) from exc
+    expires_at = (
+        datetime.now(UTC) + timedelta(seconds=result["expires_in"])
+        if result["expires_in"] > 0
+        else None
+    )
+    username = result["username"][:255]
+    try:
+        async with in_transaction():
+            # 같은 사용자·같은 Threads 신원 재연동은 새 계정이 아니라 자격증명 교체 —
+            # 소스 config(sns_account_id) 참조가 깨지지 않게 계정 id 를 보존한다.
+            existing = (
+                await SnsAccount.filter(
+                    user_id=user.id, platform=Platform.threads, platform_username=username
+                )
+                .select_for_update()  # 교체 경로와 동일한 parent-first 직렬화
+                .first()
+            )
+            if existing is not None:
+                await SnsAccountSecret.filter(account_id=existing.id).update(
+                    encrypted_credentials=ciphertext
+                )
+                if not await SnsAccountSecret.filter(account_id=existing.id).exists():
+                    await SnsAccountSecret.create(
+                        account=existing, encrypted_credentials=ciphertext
+                    )
+                existing.status = AccountStatus.active
+                existing.token_expires_at = expires_at
+                if body.display_name:
+                    existing.display_name = body.display_name
+                await existing.save(
+                    update_fields=["status", "token_expires_at", "display_name"]
+                )
+                return _out(existing)
+            account = await SnsAccount.create(
+                user=user,
+                platform=Platform.threads,
+                display_name=body.display_name or username,
+                platform_username=username,
+                token_expires_at=expires_at,
+            )
+            await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
+        ) from exc
+    return _out(account)

@@ -87,8 +87,8 @@ Req `{ pattern, match_type: "substring|regex", source_scope?: int|null }` → 20
 ## SNS 계정 (로그인 사용자 — 본인 귀속 셀프서비스) — 토큰 배제
 
 > 정책: 사용자는 **자기 SNS 계정만** 연동/조회/삭제한다. admin 은 전체 조회·삭제 가능(운영용).
-> M2 에서 Threads OAuth 콜백(`/api/sns-accounts/threads/oauth-url`·callback)이 추가될 예정 —
-> 그때까지는 개발자 콘솔에서 발급한 토큰을 credentials 로 직접 등록한다.
+> 연동 경로 2가지: ① 개발자 콘솔 발급 토큰 직접 등록(아래 POST) ② **Threads OAuth 동의
+> 화면 연동**(threads-oauth — 앱 심사 요건이자 권장 경로).
 
 ### `GET /api/sns-accounts`
 200 `[{ id, user_id, platform, display_name, status, token_expires_at }]` — **암호문/토큰 필드 없음**.
@@ -112,6 +112,20 @@ Req `{ credentials: {...} }` → 204 (본문 없음).
   흐름에서만 변한다. 무효 토큰은 수집/전송 실패와 소스 health 배지로 드러난다.)
 → 본인 계정만(admin 은 전체) · 타인 것은 404 · 암호화 키 미설정 503(등록과 동일) ·
   삭제와의 동시 경합은 404 또는 409(재시도 안내) · body 에 credentials 외 키는 422.
+
+### `GET /api/sns-accounts/threads-oauth/authorize-url` — Threads 동의 화면 URL
+200 `{ url }` — FE 는 "Threads로 연결" 버튼에서 이 URL 로 새 창/이동시킨다. 동의 완료 시
+`https://nutti.co.kr/threads-callback.html?code=...` 로 리다이렉트되고, 그 페이지가 코드를
+표시한다(수동 운반). 서버 OAuth 설정 미비 시 503.
+
+### `POST /api/sns-accounts/threads-oauth` (CSRF 필수) — 코드로 계정 연동
+Req `{ code, display_name? }` → 201 `{ id, user_id, platform, display_name, status, token_expires_at }`.
+→ 서버가 코드→단기→**장기(60일) 토큰** 교환 후 암호화 저장. `token_expires_at` 이 실제
+  만료 시각으로 채워진다(수동 등록과의 차이). `platform_username` 도 연동 시점에 확보.
+→ **같은 username 재연동이면 새 계정을 만들지 않고 그 계정의 자격증명을 교체**(계정 id
+  보존 — 소스 config 참조 유지) + `status=active` 복구. `display_name` 은 주면 갱신.
+→ 코드 무효/만료/재사용 400(고정 메시지, echo 없음) · OAuth 설정 미비 503 ·
+  암호화 키 미설정 503 · body 에 그 외 키 422(extra 금지).
 
 ### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
 

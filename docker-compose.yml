@@ -27,6 +27,10 @@ services:
       # 인증/암호화 키(.env 주입). dev 에서 비면 세션 키는 임시 생성(재시작 시 로그아웃).
       SESSION_FERNET_KEY: ${SESSION_FERNET_KEY:-}
       CREDENTIALS_FERNET_KEYS: ${CREDENTIALS_FERNET_KEYS:-}
+      # Threads OAuth(.env 주입, 비면 OAuth 경로 503) — secret 은 .env 로만
+      THREADS_APP_ID: ${THREADS_APP_ID:-}
+      THREADS_APP_SECRET: ${THREADS_APP_SECRET:-}
+      THREADS_REDIRECT_URI: ${THREADS_REDIRECT_URI:-}
     volumes:
       # dev: 호스트 코드 마운트 → 코드/마이그레이션이 호스트에 반영됨
       - ./backend:/app
