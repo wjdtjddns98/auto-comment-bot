@@ -137,14 +137,22 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
 async def delete_source(source_id: int) -> None:
     """소스 삭제 — 수집물(매칭·비발송 감사 이력)과 스코프 키워드를 함께 정리한다.
 
-    실발송 증거·조정 재료는 불가침(불변식 ②): sent 이력이 있거나 전송 진행 중
+    실발송 증거·조정 재료는 불가침(불변식 ②): sent **또는 unknown**(결과 불명 — 조정
+    미게시 판정이 오판일 수 있어 §3.6 이 흔적 보존을 전제) 이력이 있거나 전송 진행 중
     (sending·verify_pending)인 매칭이 하나라도 있으면 409 — 비활성화가 정식 경로.
     비발송 이력(approved 등)까지 함께 지우는 것은 제품 결정(2026-07-22) — 테스트/
-    오등록 소스의 원클릭 삭제 UX 를 감사 완전성보다 우선한다(실발송 이력 제외).
+    오등록 소스의 원클릭 삭제 UX 를 감사 완전성보다 우선한다(전송이 개입한 이력 제외).
     """
     try:
         async with in_transaction():
-            # parent-first 락(자격증명 교체와 동일 순서) — 동시 삭제/수정 직렬화
+            # 락 순서: Keyword → Source → MatchedPost (검증 리뷰 Medium). 키워드를
+            # 잠그는 다른 경로들 — 키워드 삭제(SET NULL cascade 로 매칭 행 잠금)와
+            # poller 매칭 INSERT 의 FK 검사(트리거 순서상 Keyword 가 Source 보다 먼저,
+            # 마이그레이션 2_ 실측) — 과 순서를 맞춰 AB-BA 데드락(40P01→500)을 없앤다.
+            scoped_kw_ids = [
+                k.id
+                for k in await Keyword.filter(source_scope_id=source_id).select_for_update()
+            ]
             source = await Source.filter(id=source_id).select_for_update().first()
             if source is None:
                 raise HTTPException(status_code=404, detail="소스가 없습니다")
@@ -156,14 +164,15 @@ async def delete_source(source_id: int) -> None:
             in_flight = any(
                 m.status in (PostStatus.sending, PostStatus.verify_pending) for m in matches
             )
-            has_sent = bool(match_ids) and await ReplyActionLog.filter(
-                matched_post_id__in=match_ids, action=ReplyAction.sent
+            has_send_history = bool(match_ids) and await ReplyActionLog.filter(
+                matched_post_id__in=match_ids,
+                action__in=(ReplyAction.sent, ReplyAction.unknown),
             ).exists()
-            if in_flight or has_sent:
+            if in_flight or has_send_history:
                 raise HTTPException(
                     status_code=409,
-                    detail="실발송 이력이 있거나 전송 진행 중인 매칭이 있는 소스는 삭제할"
-                    " 수 없습니다(감사 보호) — enabled=false 비활성화가 정식 경로입니다",
+                    detail="실발송·결과 불명 이력이 있거나 전송 진행 중인 매칭이 있는 소스는"
+                    " 삭제할 수 없습니다(감사 보호) — enabled=false 비활성화가 정식 경로입니다",
                 )
             # RESTRICT 3중(이력→매칭→소스) 순서대로 명시 삭제 — DB cascade 아님.
             # 관계 필터 삭제(matched_post__source_id)는 pg 에서 DELETE+JOIN 구문 오류라
@@ -171,10 +180,16 @@ async def delete_source(source_id: int) -> None:
             if match_ids:
                 await ReplyActionLog.filter(matched_post_id__in=match_ids).delete()
                 await MatchedPost.filter(id__in=match_ids).delete()
-            await Keyword.filter(source_scope_id=source_id).delete()
+            # 잠근 스냅샷 id 로만 삭제 — 스냅샷 이후 커밋된 신규 스코프 키워드는 여기서
+            # 잠그면 락 순서가 역전되므로(위 데드락 재유입) 남겨두고, 소스 삭제의
+            # RESTRICT 백스톱 → IntegrityError → 409 재시도로 처리한다.
+            if scoped_kw_ids:
+                await Keyword.filter(id__in=scoped_kw_ids).delete()
             await Source.filter(id=source_id).delete()
     except IntegrityError as exc:
-        # 락 이후의 잔여 경합(신규 FK 참조 등) 방어 — 롤백으로 부분 삭제 없음
+        # 백스톱: 신규 매칭 INSERT 는 Source FOR UPDATE 가 FK 검사(KEY SHARE)를 블록해
+        # 구조적으로 못 끼어든다 — 남는 경합은 스냅샷 직후 커밋된 스코프 키워드 등
+        # 드문 경우뿐이고, 롤백으로 부분 삭제 없이 재시도 안내로 수렴한다.
         raise HTTPException(
             status_code=409, detail="소스 상태가 변경되었습니다 — 다시 시도해 주세요"
         ) from exc

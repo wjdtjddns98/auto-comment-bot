@@ -60,8 +60,9 @@ Req(부분) `{ name?, enabled?, poll_interval_sec?, config? }` → 200. `config`
 ### `DELETE /api/sources/{id}` → 204.
 → **수집물 cascade**(2026-07-22 제품 결정): 매칭 이력·비발송 감사 이력(approved 등)·
   스코프 키워드를 소스와 함께 정리한다. 전역 키워드는 무관.
-→ 단 **실발송(sent) 이력이 있거나 전송 진행 중(sending·verify_pending) 매칭이 있으면
-  409**(감사·조정 재료 보호 — 불변식 ②). 이 경우 `enabled=false` 비활성화가 정식 경로.
+→ 단 **실발송(sent)·결과 불명(unknown) 이력이 있거나 전송 진행 중(sending·verify_pending)
+  매칭이 있으면 409**(감사·조정 재료 보호 — 불변식 ②. unknown 은 조정 미게시 판정이
+  오판일 수 있어 흔적 보존). 이 경우 `enabled=false` 비활성화가 정식 경로.
 
 ---
 

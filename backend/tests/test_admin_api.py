@@ -320,8 +320,8 @@ async def test_delete_source_cascades_collection(admin_session):
 
 
 async def test_delete_source_with_sent_history_409(admin_session):
-    """실발송 증거·조정 재료는 불가침(불변식 ②) — sent 이력 또는 전송 진행 중 매칭이
-    있으면 소스 삭제 409(부분 삭제 없음), enabled=false 비활성화가 정식 경로."""
+    """실발송 증거·조정 재료는 불가침(불변식 ②) — sent·unknown 이력 또는 전송 진행 중
+    매칭이 있으면 소스 삭제 409(부분 삭제 없음), enabled=false 비활성화가 정식 경로."""
     client, csrf = admin_session
     me = (await client.get("/api/auth/me")).json()
     src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
@@ -340,7 +340,7 @@ async def test_delete_source_with_sent_history_409(admin_session):
     )
     try:
         assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
-        # 부분 삭제 없음 — 매칭·이력·스코프 키워드 전부 생존(트랜잭션 롤백)
+        # 보호 검사가 삭제보다 먼저라 아무것도 지워지지 않는다 — 전부 생존
         assert await MatchedPost.get_or_none(id=post.id) is not None
         assert await ReplyActionLog.filter(matched_post_id=post.id).count() == 1
         assert await Keyword.get_or_none(id=scoped_kw["id"]) is not None
@@ -348,6 +348,15 @@ async def test_delete_source_with_sent_history_409(admin_session):
         # 전송 진행 중(verify_pending)도 동일 보호 — sent 이력 없이 상태만으로 차단
         await ReplyActionLog.filter(matched_post_id=post.id).delete()
         await MatchedPost.filter(id=post.id).update(status=PostStatus.verify_pending)
+        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+
+        # 조정 미게시 판정 후 reviewing 복귀 행(unknown 이력만 존재)도 보호(검증 리뷰
+        # High) — 미게시 판정은 오판일 수 있어(설계 §3.6) 애매한 전송 흔적은 지우지 않는다
+        await MatchedPost.filter(id=post.id).update(status=PostStatus.reviewing)
+        await ReplyActionLog.create(
+            matched_post=post, reviewer_id=me["id"], final_body="발송 본문",
+            action=ReplyAction.unknown, error="결과 불명",
+        )
         assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
     finally:
         await ReplyActionLog.filter(matched_post_id=post.id).delete()
