@@ -1,7 +1,8 @@
-import { Link, Outlet } from "react-router-dom";
+import { NavLink, Outlet } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { getHealth } from "../lib/apiClient";
 import { useAuth } from "../hooks/useAuth";
+import { cn } from "../lib/cn";
 import { Badge, type BadgeTone } from "./ui/Badge";
 import { Button } from "./ui/Button";
 
@@ -33,20 +34,30 @@ export function Layout() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex items-center gap-4 border-b border-gray-200 bg-white px-6 py-3">
-        <strong className="text-gray-900">SNS 키워드 모니터</strong>
-        <nav className="flex gap-3 text-sm text-gray-600">
+      <header className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-gray-200 bg-white px-6 py-3">
+        <strong className="whitespace-nowrap text-gray-900">SNS 키워드 모니터</strong>
+        <nav className="flex flex-wrap gap-x-1 gap-y-1 text-sm text-gray-600">
           {visibleLinks.map((link) => (
-            <Link key={link.to} to={link.to} className="hover:text-brand-600">
+            <NavLink
+              key={link.to}
+              to={link.to}
+              end={link.to === "/"}
+              className={({ isActive }) =>
+                cn(
+                  "whitespace-nowrap rounded-md px-2 py-2 hover:bg-gray-100 hover:text-brand-600",
+                  isActive && "bg-brand-50 font-semibold text-brand-700"
+                )
+              }
+            >
               {link.label}
-            </Link>
+            </NavLink>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex flex-wrap items-center gap-3">
           <HealthBadge />
           {user && (
             <>
-              <span className="text-sm text-gray-600">
+              <span className="whitespace-nowrap text-sm text-gray-600">
                 {user.email} ({user.role})
               </span>
               <Button variant="secondary" size="sm" onClick={() => logout()}>
