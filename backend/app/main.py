@@ -23,6 +23,13 @@ from app.models import Source
 
 scheduler = AsyncIOScheduler()
 
+# httpx/httpcore 는 INFO 레벨에서 요청 URL 전체(쿼리 포함)를 로깅한다 — Threads OAuth
+# 장기 토큰 전환은 공식 계약상 client_secret/access_token 이 쿼리로 나가므로, 앱을
+# --log-level info/debug 로 띄워도 시크릿이 stdout 에 찍히지 않게 여기서 고정한다
+# (불변식 ③, OAuth 1차 적대 리뷰 High-2 — httpx 0.28 실측).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

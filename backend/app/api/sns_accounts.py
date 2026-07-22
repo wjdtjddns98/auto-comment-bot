@@ -6,10 +6,13 @@ admin 은 운영 파악용으로 전체 조회·삭제 가능. 자격증명은 �
 재노출하지 않는다. read path 는 secret 테이블을 조회조차 하지 않는 전용 스키마
 (MUST-FIX #3, NFR-S1). M2 에서 OAuth 콜백 경로가 이 위에 얹힌다.
 """
+import hashlib
 import logging
+import secrets
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
-from urllib.parse import quote
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -169,48 +172,96 @@ async def delete_account(
 
 # ── Threads OAuth 연동 (동의 화면 기반 — 앱 심사 스크린캐스트 요건) ──────────────────
 
+# state 저장소: state → (user_id, 만료 시각 epoch). in-memory 는 단일 워커 전제(NFR-P1)와
+# 일치 — 재시작하면 진행 중이던 연동만 무효화된다(다시 연동하면 됨). 용도: 콜백 URL 로
+# 노출되는 code 를 다른 로그인 사용자가 자기 세션에 제출하는 것 차단(1차 적대 리뷰
+# High-3) — state 는 발급 사용자에게 바인딩되고 1회용이다.
+_OAUTH_STATE_TTL_SEC = 600
+_oauth_states: dict[str, tuple[int, float]] = {}
+
+
+def _issue_oauth_state(user_id: int) -> str:
+    # 만료분 청소(누수 방지) — 호출 빈도가 낮아 전수 순회로 충분
+    now = time.monotonic()
+    for key in [k for k, (_, exp) in _oauth_states.items() if exp < now]:
+        _oauth_states.pop(key, None)
+    state = secrets.token_urlsafe(32)
+    _oauth_states[state] = (user_id, now + _OAUTH_STATE_TTL_SEC)
+    return state
+
+
+def _consume_oauth_state(state: str, user_id: int) -> bool:
+    """1회용 소비 — 존재·미만료·발급 사용자 일치 시에만 True."""
+    entry = _oauth_states.pop(state, None)
+    return entry is not None and entry[0] == user_id and entry[1] >= time.monotonic()
+
 
 class ThreadsOAuthIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # 인증 코드는 1회용·단수명 — 저장하지 않고 즉시 교환만 한다. 응답/로그 echo 금지.
     code: str = Field(min_length=1)
+    state: str = Field(min_length=1)
     display_name: str | None = Field(default=None, max_length=255)
 
 
 @router.get("/threads-oauth/authorize-url")
-async def threads_authorize_url() -> dict:
+async def threads_authorize_url(user: Annotated[User, Depends(current_user)]) -> dict:
     """FE 가 사용자를 보낼 Threads 동의 화면 URL. 설정 미비면 503(등록 경로와 동일 원칙).
 
-    state 미사용: 콜백은 자동 처리가 아니라 정적 페이지의 코드를 운영자가 직접 대시보드에
-    붙여넣는 수동 운반 경로다 — 세션에 바인딩할 리다이렉트 처리 자체가 없다. 코드의
-    진위는 교환 단계에서 Meta 가 (redirect_uri·client 일치로) 검증한다.
+    state 는 서버 발급(사용자 바인딩·10분 TTL·1회용) — 콜백 페이지가 code 와 함께
+    되돌려주고 POST 에서 검증된다. secret 포함 전체 설정을 검사한다(어느 하나라도
+    없으면 어차피 교환이 불가 — 동의 화면까지 보내놓고 실패시키지 않는다).
     """
     from app.sources.threads import OAUTH_AUTHORIZE_URL, OAUTH_SCOPES
 
-    if not (settings.threads_app_id and settings.threads_redirect_uri):
+    if not (
+        settings.threads_app_id and settings.threads_app_secret and settings.threads_redirect_uri
+    ):
         raise HTTPException(
             status_code=503, detail="Threads OAuth 설정이 없습니다 — 서버 설정 필요"
         )
-    url = (
-        f"{OAUTH_AUTHORIZE_URL}?client_id={settings.threads_app_id}"
-        f"&redirect_uri={quote(settings.threads_redirect_uri, safe='')}"
-        f"&scope={OAUTH_SCOPES}&response_type=code"
+    query = urlencode(
+        {
+            "client_id": settings.threads_app_id,
+            "redirect_uri": settings.threads_redirect_uri,
+            "scope": OAUTH_SCOPES,
+            "response_type": "code",
+            "state": _issue_oauth_state(user.id),
+        }
     )
-    return {"url": url}
+    return {"url": f"{OAUTH_AUTHORIZE_URL}?{query}"}
+
+
+def _identity_lock_key(user_id: int, platform_user_id: str) -> int:
+    """트랜잭션 advisory lock 키 — 같은 (사용자, Threads 신원) 동시 연동 직렬화.
+    select_for_update 는 '아직 없는 행'을 잠글 수 없어 동시 create 중복을 못 막는다
+    (1차 적대 리뷰 High-4). 부분 unique(마이그레이션 6_)가 DB 백스톱."""
+    digest = hashlib.sha256(f"{user_id}:threads:{platform_user_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big", signed=True)
 
 
 @router.post("/threads-oauth", status_code=201, dependencies=[Depends(require_csrf)])
 async def threads_oauth_connect(
     body: ThreadsOAuthIn, user: Annotated[User, Depends(current_user)]
 ) -> SnsAccountOut:
-    """인증 코드 → 장기 토큰 교환 → 계정 연동(같은 username 재연동이면 자격증명 교체).
+    """인증 코드 → 장기 토큰 교환 → 계정 연동. 같은 신원(안정 user id) 재연동이면
+    새 계정이 아니라 자격증명 교체(계정 id 보존 — 소스 config 참조 유지).
 
     수동 토큰 등록(POST /)과 대비: 동의 화면을 거치므로 토큰 수명(60일)·만료 시각을
-    알고 저장한다. 교환 실패는 400 고정 메시지(코드 echo 없음 — 불변식 ③).
+    알고 저장한다. 교환 거부 400 / 업스트림 장애 502 — 전부 고정 메시지(echo 없음).
     """
-    from app.sources.threads import OAuthExchangeError, oauth_exchange_code
+    from app.sources.threads import (
+        OAuthExchangeError,
+        OAuthUpstreamError,
+        oauth_exchange_code,
+    )
 
+    if not _consume_oauth_state(body.state, user.id):
+        raise HTTPException(
+            status_code=400,
+            detail="연동 세션이 만료되었거나 유효하지 않습니다 — 다시 연동해 주세요",
+        )
     try:
         result = await oauth_exchange_code(body.code)
     except RuntimeError as exc:
@@ -219,10 +270,16 @@ async def threads_oauth_connect(
         ) from exc
     except OAuthExchangeError as exc:
         # 요약(HTTP 상태/Meta code)은 서버 로그로만 — 응답은 고정 메시지.
-        logger.warning("Threads OAuth 코드 교환 실패: %s", exc)
+        logger.warning("Threads OAuth 코드 교환 거부: %s", exc)
         raise HTTPException(
             status_code=400,
             detail="인증 코드가 유효하지 않거나 만료되었습니다 — 다시 연동해 주세요",
+        ) from exc
+    except OAuthUpstreamError as exc:
+        logger.warning("Threads OAuth 업스트림 장애: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail="Threads 연동 서버와 통신하지 못했습니다 — 잠시 후 다시 시도해 주세요",
         ) from exc
     try:
         ciphertext = crypto.encrypt_credentials({"access_token": result["access_token"]})
@@ -237,15 +294,23 @@ async def threads_oauth_connect(
         else None
     )
     username = result["username"][:255]
+    platform_user_id = result["user_id"][:64]
     try:
-        async with in_transaction():
-            # 같은 사용자·같은 Threads 신원 재연동은 새 계정이 아니라 자격증명 교체 —
-            # 소스 config(sns_account_id) 참조가 깨지지 않게 계정 id 를 보존한다.
+        async with in_transaction() as tx:
+            # 같은 (사용자, 신원) 동시 연동 직렬화 — 행이 없을 때도 잠긴다(위 헬퍼 참조)
+            await tx.execute_query(
+                "SELECT pg_advisory_xact_lock($1)",
+                [_identity_lock_key(user.id, platform_user_id)],
+            )
+            # upsert 키는 안정 식별자(platform_user_id) — username 은 변경/탈취 가능이라
+            # 식별에 쓰지 않고 표시·판정용으로 매 연동 갱신만 한다(1차 적대 리뷰 High-5)
             existing = (
                 await SnsAccount.filter(
-                    user_id=user.id, platform=Platform.threads, platform_username=username
+                    user_id=user.id,
+                    platform=Platform.threads,
+                    platform_user_id=platform_user_id,
                 )
-                .select_for_update()  # 교체 경로와 동일한 parent-first 직렬화
+                .select_for_update()
                 .first()
             )
             if existing is not None:
@@ -258,10 +323,13 @@ async def threads_oauth_connect(
                     )
                 existing.status = AccountStatus.active
                 existing.token_expires_at = expires_at
+                existing.platform_username = username
                 if body.display_name:
                     existing.display_name = body.display_name
                 await existing.save(
-                    update_fields=["status", "token_expires_at", "display_name"]
+                    update_fields=[
+                        "status", "token_expires_at", "platform_username", "display_name",
+                    ]
                 )
                 return _out(existing)
             account = await SnsAccount.create(
@@ -269,10 +337,12 @@ async def threads_oauth_connect(
                 platform=Platform.threads,
                 display_name=body.display_name or username,
                 platform_username=username,
+                platform_user_id=platform_user_id,
                 token_expires_at=expires_at,
             )
             await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
     except IntegrityError as exc:
+        # 부분 unique(신원) 백스톱 등 잔여 경합 — 롤백으로 부분 반영 없음
         raise HTTPException(
             status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
         ) from exc

@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     # Threads OAuth (앱 심사 — 동의 화면 기반 계정 연동). 비면 OAuth 경로 503.
     # secret 은 .env 로만 주입 — 코드/로그/응답에 노출 금지(불변식 ③).
     threads_app_id: str = ""
-    threads_app_secret: str = ""
+    threads_app_secret: str = Field(default="", repr=False)  # repr/디버그 출력에서도 제외
     threads_redirect_uri: str = ""  # 콘솔에 등록된 redirect URI 와 정확히 일치해야 함
 
     # 인증/암호화 (M1)

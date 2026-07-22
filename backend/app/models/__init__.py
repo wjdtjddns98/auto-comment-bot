@@ -82,6 +82,10 @@ class SnsAccount(Model):
     # write 어댑터가 **매 전송 직전** 갱신한다(threads.py, 2차 리뷰 중요-1). 조정은 이 live
     # 값과 verify_meta.platform_username 스냅샷을 둘 다 후보로 쓴다(reconcile.py).
     platform_username = fields.CharField(max_length=255, null=True)
+    # 플랫폼의 **안정 식별자**(Threads user id) — OAuth upsert 키. username 은 변경/탈취
+    # 가능이라 식별자로 쓰지 않는다(OAuth 1차 적대 리뷰 High-5). 수동 토큰 등록 행은 null.
+    # (user_id, platform, platform_user_id) 부분 unique 는 마이그레이션 6_ 참조.
+    platform_user_id = fields.CharField(max_length=64, null=True)
     token_expires_at = fields.DatetimeField(null=True)
     status = fields.CharEnumField(AccountStatus, max_length=16, default=AccountStatus.active)
     created_at = fields.DatetimeField(auto_now_add=True)
