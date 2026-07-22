@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createSource, deleteSource, getSnsAccounts, getSources, patchSource } from "../lib/apiClient";
+import { ApiError, createSource, deleteSource, getSnsAccounts, getSources, patchSource } from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
 import {
   SOURCE_TYPE_IMPLEMENTED,
@@ -168,6 +168,7 @@ function SourceRow({ source }: { source: Source }) {
     getThreadsAccountId(source.config)
   );
   const [error, setError] = useState<string | null>(null);
+  const [deleteBlocked, setDeleteBlocked] = useState(false);
   const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
   const isThreads = source.type === "threads";
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
@@ -180,6 +181,7 @@ function SourceRow({ source }: { source: Source }) {
     mutationFn: (body: Parameters<typeof patchSource>[1]) => patchSource(source.id, body),
     onSuccess: () => {
       setError(null);
+      setDeleteBlocked(false);
       invalidate();
     },
     onError: (err) => setError(describeApiError(err)),
@@ -187,9 +189,18 @@ function SourceRow({ source }: { source: Source }) {
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteSource(source.id),
-    onSuccess: invalidate,
-    // 409 사유(매칭 이력 vs 스코프 키워드)에 따라 서버가 다른 문구를 보내므로 그대로 노출한다.
-    onError: (err) => setError(describeApiError(err)),
+    onSuccess: () => {
+      setDeleteBlocked(false);
+      invalidate();
+      // 소스 삭제는 매칭 이력·스코프 키워드를 cascade 정리하므로 관련 캐시도 함께 갱신한다.
+      queryClient.invalidateQueries({ queryKey: ["matches"] });
+      queryClient.invalidateQueries({ queryKey: ["keywords"] });
+    },
+    // 409(감사 보호: 실발송·결과 불명 이력/전송 진행 중)는 서버 문구를 그대로 노출하고, 비활성화 액션을 안내한다.
+    onError: (err) => {
+      setError(describeApiError(err));
+      setDeleteBlocked(err instanceof ApiError && err.status === 409);
+    },
   });
 
   function handleSave() {
@@ -334,7 +345,19 @@ function SourceRow({ source }: { source: Source }) {
       {error && (
         <Tr>
           <Td colSpan={8} className="text-sm text-tone-danger">
-            {error}
+            <div className="flex flex-wrap items-center gap-2">
+              <span>{error}</span>
+              {deleteBlocked && source.enabled && (
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={patchMutation.isPending}
+                  onClick={() => patchMutation.mutate({ enabled: false })}
+                >
+                  대신 비활성화
+                </Button>
+              )}
+            </div>
           </Td>
         </Tr>
       )}
