@@ -21,18 +21,11 @@ import {
   getSourceDisplayName,
   isWritableSourceType,
   RECONCILED_UNPUBLISHED_ERROR,
+  REPLY_ACTION_LABEL,
   STATUS_LABEL,
   STATUS_TONE,
   THREADS_BODY_LIMIT,
 } from "../lib/matchDisplay";
-
-const REPLY_ACTION_LABEL: Record<string, string> = {
-  approved: "승인(수동 복사)",
-  sent: "전송 성공",
-  failed: "전송 실패",
-  canceled: "무시(취소)",
-  unknown: "결과 불명(조정 대기)",
-};
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) {
