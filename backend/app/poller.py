@@ -24,6 +24,12 @@ _DOWN_AFTER_FAILURES = 5
 
 _fail_counts: dict[int, int] = {}
 state: dict = {"last_tick": None}  # /health poller heartbeat (FR-17)
+# 조정 전용 실패 상태(어댑터 2차 리뷰 R-2): 조정 조회가 실패 중인 소스는 수집 성공이
+# health 를 ok 로 되돌리지 않는다 — 되돌리면 다음 조정 틱이 다시 degraded 로 낮추며
+# 배지가 주기마다 깜빡여, 지속 장애(전송 계정 토큰 만료 등)가 일시 문제처럼 보인다.
+# 갱신은 reconcile_tick 이 틱 단위로 집계해 수행한다. in-memory(NFR-P1 단일 워커) —
+# 재시작으로 리셋돼도 다음 조정 틱(60초)이 재설정한다.
+_reconcile_failing: set[int] = set()
 
 
 def _now() -> datetime:
@@ -39,8 +45,9 @@ def _is_due(source: Source, now: datetime) -> bool:
 
 
 def forget_source(source_id: int) -> None:
-    """소스 삭제 시 실패 카운터 정리(미세 누수 방지)."""
+    """소스 삭제 시 실패 카운터/조정 실패 상태 정리(미세 누수 방지)."""
     _fail_counts.pop(source_id, None)
+    _reconcile_failing.discard(source_id)
 
 
 async def poll_tick() -> None:
@@ -85,9 +92,14 @@ async def poll_source(source: Source) -> int:
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
     _fail_counts.pop(source.id, None)
     source.last_success_at = source.last_polled_at
-    source.health_status = HealthStatus.ok
     source.backoff_until = None
-    await source.save(update_fields=["last_success_at", "health_status", "backoff_until"])
+    fields = ["last_success_at", "backoff_until"]
+    # 조정 조회가 실패 중이면 health 는 건드리지 않는다(R-2 깜빡임 방지) — 이 객체의
+    # health 값 자체가 stale 일 수 있으므로 조건부 대입이 아니라 저장 필드에서 제외한다.
+    if source.id not in _reconcile_failing:
+        source.health_status = HealthStatus.ok
+        fields.append("health_status")
+    await source.save(update_fields=fields)
     return stored
 
 

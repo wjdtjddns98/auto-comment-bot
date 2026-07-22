@@ -11,6 +11,7 @@ from app import reconcile
 from app.auth import hash_password
 from app.config import settings
 from app.models import (
+    HealthStatus,
     MatchedPost,
     Platform,
     PostStatus,
@@ -245,6 +246,106 @@ async def test_reconcile_fetch_failure_keeps_row(verify_pending_match, monkeypat
     assert await ReplyActionLog.filter(matched_post_id=match.id).count() == 0
     source = await Source.get(id=match.source_id)
     assert source.health_status != "ok"  # 조용히 갇히지 않는다 — 배지로 노출
+
+
+@pytest.mark.db
+async def test_reconcile_only_failure_no_health_flap(verify_pending_match, monkeypatch):
+    """R-2 회귀: 조정 조회만 실패 중인 소스는 poller 수집 성공이 health 를 ok 로 되돌리지
+    않는다(깜빡임 방지). 조정 조회가 회복되면 다음 수집 성공이 ok 로 복귀시킨다."""
+    from app import poller
+    from app import sources as sources_registry
+    from app.sources import FetchError
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    adapter = FakeVerifyAdapter(error=FetchError("mock 조회 실패"))
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    class PollOk:  # 수집 경로는 정상인 시나리오
+        can_write = False
+
+        async def fetch(self, source, since):
+            return []
+
+    monkeypatch.setattr(poller, "get_adapter", lambda _t: PollOk())
+
+    await reconcile.reconcile_tick()
+    source = await Source.get(id=match.source_id)
+    assert source.health_status == HealthStatus.degraded
+    assert match.source_id in poller._reconcile_failing
+
+    await poller.poll_source(source)  # 수집 성공 — 그래도 배지는 유지된다
+    await source.refresh_from_db()
+    assert source.health_status == HealthStatus.degraded
+    assert source.last_success_at is not None  # 수집 회계(커서 전진)는 정상 동작
+
+    adapter.error = None  # 조정 조회 회복 → 플래그 해제 → 다음 수집 성공이 ok 복귀
+    await reconcile.reconcile_tick()
+    assert match.source_id not in poller._reconcile_failing
+    source = await Source.get(id=match.source_id)
+    await poller.poll_source(source)
+    await source.refresh_from_db()
+    assert source.health_status == HealthStatus.ok
+
+
+@pytest.mark.db
+async def test_reconcile_flag_cleared_when_rows_resolved(verify_pending_match, monkeypatch):
+    """조정 대상 행이 사라진 소스의 조정 실패 상태는 다음 틱에서 해제된다 — 영구 잔류로
+    health 회복이 막히는 누수 방지(R-2)."""
+    from app import poller
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_reconcile_failing", {match.source_id})
+    await MatchedPost.filter(id=match.id).update(
+        status=PostStatus.reviewing, verify_meta=None
+    )
+
+    await reconcile.reconcile_tick()
+
+    assert match.source_id not in poller._reconcile_failing
+
+
+@pytest.mark.db
+async def test_reconcile_rate_limited_no_reconcile_flag(verify_pending_match, monkeypatch):
+    """429 조회 실패는 공유 backoff 회계(불변식 ④)로만 처리 — 조정 전용 실패 플래그를
+    걸지 않는다(backoff 중엔 poller 도 쉬므로 깜빡임 자체가 없다)."""
+    from app import poller
+    from app import sources as sources_registry
+    from app.sources import RateLimitedError
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    adapter = FakeVerifyAdapter(error=RateLimitedError("throttle", retry_after_sec=60))
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_tick()
+
+    assert poller._reconcile_failing == set()
+    source = await Source.get(id=match.source_id)
+    assert source.backoff_until is not None  # 공유 backoff 는 정상 회계
+
+
+@pytest.mark.db
+async def test_reviewer_delete_blocked_by_audit_restrict(verify_pending_match):
+    """감사 이력이 있는 reviewer 는 하드삭제가 DB 에서 거부된다(RESTRICT — R-5 방어 확인).
+    사용자 삭제 기능 도입 시 전제조건은 models.ReplyActionLog.reviewer 주석 참조."""
+    from tortoise.exceptions import IntegrityError
+
+    match, user, account, body = verify_pending_match
+    reviewer = await User.create(
+        email=f"r-{uuid.uuid4().hex[:10]}@test.local",
+        password_hash=hash_password(PASSWORD), role=Role.reviewer,
+    )
+    log = await ReplyActionLog.create(
+        matched_post=match, reviewer=reviewer, final_body=body,
+        action=ReplyAction.failed, error="테스트 이력",
+    )
+    with pytest.raises(IntegrityError):
+        await reviewer.delete()
+    await log.delete()
+    await reviewer.delete()  # 이력이 없으면 삭제 가능(정리 겸 대조 검증)
 
 
 @pytest.mark.db

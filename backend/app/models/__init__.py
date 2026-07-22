@@ -190,6 +190,10 @@ class ReplyActionLog(Model):
     )
     # RESTRICT: 감사 행위자(user) 삭제로 이력이 증발하지 않게. 감사 이력이 있는 사용자는
     # 하드삭제 불가 — 향후 사용자 관리는 비활성화/소프트삭제 정책으로 간다.
+    # 주의(어댑터 2차 리뷰 R-5): 사용자 삭제 기능을 도입한다면 이 RESTRICT 만으로는
+    # 부족하다 — matched_posts.verify_meta.reviewer_id 는 FK 가 아니어서, 감사 이력이
+    # 아직 없는 승인자(크래시 잔재 verify_pending)가 삭제되면 조정 잡의 승계 기록이
+    # IntegrityError 로 영구 반복된다. 도입 시 verify_pending 참조 검사를 함께 넣을 것.
     reviewer = fields.ForeignKeyField(
         "models.User", related_name="reply_actions", on_delete=fields.RESTRICT
     )
