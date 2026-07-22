@@ -56,15 +56,21 @@ M1 approve 경로(`app/api/matches.py::_approve`)에서 `send_reply` 실패는 �
 - `ReplyAction` 에 **`unknown`** 추가: 결과 불명 발생 audit. 에러 요약 포함 — 기존
   `_safe_error` 급 필터링 동일 적용(불변식 ③).
 - `matched_posts` 에 **`verify_meta` JSONB** (nullable) 추가:
-  `{target_media_id, container_id?, claim_ts, attempts, reviewer_id, final_body, sns_account_id}`.
-  (`sns_account_id` 는 조정 조회의 인증 계정 + `platform_username` 참조용 — 구현 시 추가.)
-  **CAS 클레임 성공 직후·전송 호출 전에 기록**한다(예외 핸들러가 아니라) — 프로세스 크래시로
-  예외 핸들러가 못 돈 잔재(sweep 회수분)에도 조정 재료(대상·본문·승인자)가 남아야 하기
-  때문이다. 토큰 등 비밀 없음(불변식 ③ — final_body 는 사람이 승인한 게시 예정 본문).
+  `{target_media_id, container_id?, claim_ts, attempts, reviewer_id, final_body, sns_account_id,
+  platform_username?}`.
+  (`sns_account_id` 는 조정 조회의 인증 계정 + `platform_username` 참조용 — 구현 시 추가.
+  `platform_username` 은 **결과 불명 시점의 판정 키 스냅샷** — 자격증명 교체(토큰 교체 API)로
+  계정 신원이 바뀌어도 조정 판정이 오염되지 않게 한다. 토큰 교체 API 3차 독립 리뷰 blocker.)
+  기본 필드는 **CAS 클레임 성공 직후·전송 호출 전에 기록**한다(예외 핸들러가 아니라) —
+  프로세스 크래시로 예외 핸들러가 못 돈 잔재(sweep 회수분)에도 조정 재료(대상·본문·승인자)가
+  남아야 하기 때문이다. 예외적으로 `platform_username` 스냅샷만 **결과 불명 예외 시점**에
+  기록된다(전송 중 어댑터가 갱신한 값이어야 해서 — §3.6 크래시∧교체 복합 잔여의 원인).
+  토큰 등 비밀 없음(불변식 ③ — final_body 는 사람이 승인한 게시 예정 본문).
   sent/확정 실패/ignore 로 종결되면 null 로 청소한다.
-- `sns_accounts` 에 **`platform_username`** 추가: 조정 판정 키(§3.4-2). 계정 등록·토큰 갱신
-  시점에 `GET /me?fields=username` 으로 확보·저장한다 — 조정 조회 시점에 확보하는 방식은
-  토큰 만료 시 판정 자체가 불가능해지므로 전송 전에 미리 저장돼 있어야 한다.
+- `sns_accounts` 에 **`platform_username`** 추가: 조정 판정 키(§3.4-2, live). 계정 등록
+  시점에 `GET /me?fields=username` 으로 확보·저장하고 write 어댑터가 **매 전송 직전**
+  갱신한다(2차 리뷰 중요-1) — 조정 조회 시점에 확보하는 방식은 토큰 만료 시 판정 자체가
+  불가능해지므로 전송 전에 미리 저장돼 있어야 한다.
 
 ### 3.2 어댑터 계약 변경 (`app/sources/base.py`)
 
@@ -118,9 +124,11 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
 ### 3.4 조정 잡 (스케줄러, poller 와 동일 인프라)
 
 주기(예: 60초)로 `verify_pending` 행을 처리한다. 판정 재료(`target_media_id`·`claim_ts`·
-`final_body`·`reviewer_id`)는 전부 `verify_meta` 에서, 전송 계정 username 은
-`sns_accounts.platform_username` 에서 가져온다 — `_approve` 예외 경로든 sweep 회수분(크래시
-잔재)이든 동일하게 동작한다(§3.1).
+`final_body`·`reviewer_id`)는 전부 `verify_meta` 에서 가져오고, 전송 계정 username 은
+**`verify_meta.platform_username` 스냅샷과 `sns_accounts.platform_username`(live) 둘 다
+후보**로 검사한다(4차 검증 리뷰) — 스냅샷은 자격증명 교체(신원 교체) 오염을 막고(3차 blocker),
+live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 계약일 경우를 놓치지 않는다
+(2차 리뷰 중요-1). 후보 확대의 오판 방향은 "더 찾음"(replied 종결)이라 이중 게시 안전 쪽(§3.6).
 
 1. `GET /{target_media_id}/replies?fields=id,username,text,timestamp` (필요 시 `/conversation`,
    cursor 순회는 claim_ts 이전 timestamp 가 나오면 중단 — 어댑터 계약 `fetch_replies(source,
@@ -179,6 +187,11 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
   (URL 이 앞 40자 안에 있으면 prefix 판정도 실패).
 - `/replies` 의 read-after-write 일관성이 보장되지 않거나, 스팸 필터 보류·지연 노출로 답글이
   5분 창 이후에 나타나는 경우.
+- **크래시 잔재 + 자격증명 교체 복합**: publish 도중 프로세스 크래시로 `platform_username`
+  스냅샷이 못 남은 행(§3.1 — 스냅샷은 결과 불명 예외 시점에 기록)에 대해, 조정 전에 같은
+  계정의 자격증명이 **다른 신원으로 교체**되면 live 폴백 판정 키가 오염된다. 정상 결과 불명
+  경로는 스냅샷으로 방어되고(3차 독립 리뷰 blocker 반영), 이 복합 케이스(크래시∧교체∧재승인)만
+  잔여 — 완전 봉합은 publish 호출 전 스냅샷 영속화(후속, R8 과 함께 검토).
 
 완화:
 - 미게시 판정 후 FE 에 "재시도 전 대상 글 직접 확인 권장" 표시 — 사람이 최종 방어선.

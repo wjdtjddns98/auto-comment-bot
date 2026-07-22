@@ -107,6 +107,10 @@ export interface CreateSnsAccountRequest {
   credentials: Record<string, unknown>;
 }
 
+export interface UpdateSnsAccountCredentialsRequest {
+  credentials: Record<string, unknown>;
+}
+
 export type MatchedPostStatus =
   | "new"
   | "reviewing"

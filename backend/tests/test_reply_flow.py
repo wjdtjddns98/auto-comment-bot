@@ -368,6 +368,8 @@ async def test_send_timeout_goes_verify_pending(reviewer_session, monkeypatch):
         assert match.verify_meta["reviewer_id"] == user.id
         assert match.verify_meta["final_body"] == "본문"
         assert match.verify_meta["sns_account_id"] == account.id
+        # 판정 키 스냅샷(토큰 교체 3차 리뷰 blocker) — 타임아웃 경로도 기록된다
+        assert match.verify_meta["platform_username"] == "our_bot"
     finally:
         await _cleanup(match)
         await account.delete()
@@ -392,6 +394,8 @@ async def test_unknown_outcome_gates_and_ignore_escape(reviewer_session, monkeyp
         await match.refresh_from_db()
         assert match.status == PostStatus.verify_pending
         assert match.verify_meta["container_id"] == "mock-container-1"
+        # 판정 키 스냅샷 — 이후 자격증명 교체(신원 교체)가 조정 판정을 오염시키지 않는다
+        assert match.verify_meta["platform_username"] == "our_bot"
 
         # 결과 불명 상태에서 재전송 경로는 구조적으로 닫혀 있다(CAS 클레임 대상 아님)
         for path in ("approve", "retry"):
@@ -405,6 +409,39 @@ async def test_unknown_outcome_gates_and_ignore_escape(reviewer_session, monkeyp
         await match.refresh_from_db()
         assert match.status == PostStatus.ignored
         assert match.verify_meta is None
+    finally:
+        await _cleanup(match)
+        await account.delete()
+
+
+class _RefreshingUnknownAdapter(FakeWriteAdapter):
+    """실어댑터(threads.py)처럼 publish 전에 판정 키를 갱신·저장하고 결과 불명으로 끝나는
+    mock — 스냅샷이 '이번 시도에서 갱신된 신원'을 담는 시간순서 계약(3차 blocker 핵심) 검증용."""
+
+    async def send_reply(self, source, post, body, account) -> str:
+        account.platform_username = "fresh_bot"
+        await account.save(update_fields=["platform_username"])
+        raise SendOutcomeUnknown("mock publish 응답 유실", container_id="mock-container-1")
+
+
+async def test_unknown_snapshot_captures_refreshed_username(reviewer_session, monkeypatch):
+    """스냅샷은 등록 시점 값(our_bot)이 아니라 어댑터가 **이번 전송에서 갱신한** 값이어야
+    한다(4차 검증 리뷰 Low — send_reply 판정 키 갱신(2차 중요-1)과 스냅샷의 결합 지점)."""
+    client, csrf, user = reviewer_session
+    monkeypatch.setitem(
+        sources_registry._ADAPTERS, SourceType.threads, _RefreshingUnknownAdapter()
+    )
+    match = await _make_match(user, SourceType.threads)
+    account = await _make_threads_account(user)  # 등록 시점 값 our_bot — stale 가정
+    try:
+        r = await client.post(
+            f"/api/matches/{match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": account.id}, headers=csrf,
+        )
+        assert r.status_code == 502 and r.json()["action"] == "unknown"
+        await match.refresh_from_db()
+        assert match.status == PostStatus.verify_pending
+        assert match.verify_meta["platform_username"] == "fresh_bot"
     finally:
         await _cleanup(match)
         await account.delete()

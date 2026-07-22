@@ -173,6 +173,20 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     // 전송 결과 불명 — 자동 조정 대기(M2). 읽기 전용 뱃지 + ignore 만 활성 화면 재현용.
     status: "verify_pending",
   },
+  {
+    id: 7,
+    source_id: 1,
+    external_post_id: "th_1004",
+    author: "user_jkl",
+    url: "https://www.threads.net/@user_jkl/post/1004",
+    content: "강아지 간식 추천 감사합니다 계산기로 급여량 확인해봤어요",
+    matched_keyword_id: 1,
+    published_at: "2026-07-20T13:00:00Z",
+    matched_at: "2026-07-20T13:05:00Z",
+    // 조정(reconcile) 성공 확정 — verify_pending 에서 실 게시가 확인돼 replied 로 전이(M2 수용
+    // 기준 "Threads 실발송→external_reply_id 기록", #28 조정 조회 흐름 최종 확인용).
+    status: "replied",
+  },
 ];
 
 export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
@@ -206,5 +220,27 @@ export const MOCK_REPLY_ACTIONS: ReplyAction[] = [
     external_reply_id: null,
     error: "전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다",
     created_at: "2026-07-20T12:06:00Z",
+  },
+  {
+    id: 4,
+    matched_post_id: 7,
+    reviewer_user_id: 2,
+    action: "unknown",
+    template_id: 1,
+    external_reply_id: null,
+    error: "전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다",
+    created_at: "2026-07-20T13:06:00Z",
+  },
+  {
+    id: 5,
+    matched_post_id: 7,
+    reviewer_user_id: 2,
+    // 조정 잡이 대상 글에서 실제 게시된 답글을 찾아 확정한 이력(backend/app/reconcile.py 168-174)
+    // — external_reply_id 가 이 시점에 채워진다. unknown → sent 순서 재현이 핵심(#28 최종 확인).
+    action: "sent",
+    template_id: 1,
+    external_reply_id: "th_reply_9001",
+    error: null,
+    created_at: "2026-07-20T13:11:00Z",
   },
 ];
