@@ -17,6 +17,7 @@ import type {
   Source,
   SnsAccount,
   Template,
+  ThreadsOAuthAuthorizeUrlResponse,
   User,
 } from "../../types/api";
 import {
@@ -429,6 +430,52 @@ function handleDeleteSnsAccount(id: number): void {
   snsAccounts.splice(idx, 1);
 }
 
+// Threads OAuth 연동 모의: 재연동(같은 code 접두) 시 새 행이 아니라 기존 행을 갱신하는
+// 실서버 동작(계정 id 보존)을 재현하기 위해 계정 id → 모의 platform_username 을 별도로 추적한다
+// (SnsAccount 응답 스키마엔 platform_username 이 없다 — 백엔드 SnsAccountOut 과 동일).
+const threadsOAuthUsernames = new Map<number, string>();
+
+function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
+  requireUser();
+  return { url: "https://www.threads.net/oauth/authorize?mock=1&client_id=mock&redirect_uri=mock" };
+}
+
+// 코드 "invalid" 로 만료/무효 코드 400 흐름을 재현해볼 수 있다(다른 목서버 매직 값들과 동일 관례).
+function handleThreadsOAuthConnect(body: unknown): SnsAccount {
+  const user = requireUser();
+  const req = (body ?? {}) as { code?: string; display_name?: string };
+  const code = (req.code ?? "").trim();
+  if (!code) throw new MockApiError(422, "code: 인증 코드가 필요합니다");
+  if (code === "invalid") {
+    throw new MockApiError(400, "인증 코드가 유효하지 않거나 만료되었습니다 — 다시 연동해 주세요");
+  }
+  const username = `mock_${code.slice(0, 12)}`;
+  const tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString();
+  const existing = snsAccounts.find(
+    (a) =>
+      a.user_id === user.id &&
+      a.platform === "threads" &&
+      threadsOAuthUsernames.get(a.id) === username
+  );
+  if (existing) {
+    existing.status = "active";
+    existing.token_expires_at = tokenExpiresAt;
+    if (req.display_name) existing.display_name = req.display_name;
+    return existing;
+  }
+  const record: SnsAccount = {
+    id: nextId(snsAccounts),
+    user_id: user.id,
+    platform: "threads",
+    display_name: req.display_name || username,
+    status: "active",
+    token_expires_at: tokenExpiresAt,
+  };
+  snsAccounts.push(record);
+  threadsOAuthUsernames.set(record.id, username);
+  return record;
+}
+
 function handleUpdateSnsAccountCredentials(id: number, body: unknown): void {
   const user = requireUser();
   const record = snsAccounts.find((a) => a.id === id);
@@ -623,6 +670,16 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
     method: "PUT",
     pattern: /^\/api\/sns-accounts\/(?<id>\d+)\/credentials$/,
     handler: (p, _q, body) => handleUpdateSnsAccountCredentials(Number(p.id), body),
+  },
+  {
+    method: "GET",
+    pattern: /^\/api\/sns-accounts\/threads-oauth\/authorize-url$/,
+    handler: () => handleThreadsAuthorizeUrl(),
+  },
+  {
+    method: "POST",
+    pattern: /^\/api\/sns-accounts\/threads-oauth$/,
+    handler: (_p, _q, body) => handleThreadsOAuthConnect(body),
   },
 
   { method: "GET", pattern: /^\/api\/reply-actions$/, handler: (_p, q) => handleGetReplyActions(q) },

@@ -20,6 +20,8 @@ import type {
   Source,
   SnsAccount,
   Template,
+  ThreadsOAuthAuthorizeUrlResponse,
+  ThreadsOAuthConnectRequest,
   UpdateSnsAccountCredentialsRequest,
   User,
 } from "../types/api";
@@ -200,6 +202,10 @@ export const deleteSnsAccount = (id: number) =>
   request<void>(`/api/sns-accounts/${id}`, { method: "DELETE" });
 export const updateSnsAccountCredentials = (id: number, body: UpdateSnsAccountCredentialsRequest) =>
   request<void>(`/api/sns-accounts/${id}/credentials`, { method: "PUT", body });
+export const getThreadsOAuthAuthorizeUrl = () =>
+  request<ThreadsOAuthAuthorizeUrlResponse>("/api/sns-accounts/threads-oauth/authorize-url");
+export const connectThreadsOAuth = (body: ThreadsOAuthConnectRequest) =>
+  request<SnsAccount>("/api/sns-accounts/threads-oauth", { method: "POST", body });
 
 // --- 감사 로그 ---
 export const getReplyActions = (query?: { match_id?: number }) =>
