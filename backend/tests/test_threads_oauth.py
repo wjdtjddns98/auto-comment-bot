@@ -215,6 +215,26 @@ async def test_oauth_state_required_and_single_use(oauth_session, monkeypatch):
     assert await SnsAccount.filter(user_id=user.id).count() == 0
 
 
+async def test_oauth_state_superseded_by_reissue(oauth_session, monkeypatch):
+    """사용자당 state 1개 — 재발급이 이전 state 를 무효화(2차 리뷰 High-1: 반복 발급으로
+    저장소가 사용자 수 이상 자라지 않는다). 최신 state 만 유효."""
+    client, csrf, user = oauth_session
+    _mock_transport(monkeypatch)
+    state_old = await _fresh_state(client)
+    state_new = await _fresh_state(client)
+
+    r = await client.post(
+        "/api/sns-accounts/threads-oauth",
+        json={"code": "c1", "state": state_old}, headers=csrf,
+    )
+    assert r.status_code == 400  # 덮어쓰인 이전 state 거부
+    r = await client.post(
+        "/api/sns-accounts/threads-oauth",
+        json={"code": "c1", "state": state_new}, headers=csrf,
+    )
+    assert r.status_code == 201
+
+
 async def test_oauth_state_is_user_bound(oauth_session, monkeypatch):
     """다른 사용자가 발급받은 state 는 내 세션에서 거부 — code 이식 공격 경로 차단."""
     client, csrf, user = oauth_session
@@ -262,7 +282,7 @@ async def test_oauth_upstream_failure_502_no_url_leak(oauth_session, monkeypatch
             json={"code": "c1", "state": state}, headers=csrf,
         )
     assert r.status_code == 502
-    assert "잠시 후" in r.json()["detail"]
+    assert "다시 연동" in r.json()["detail"]  # state 소비 후라 재시도가 아닌 재연동 안내(M4)
     assert APP_SECRET not in r.text and APP_SECRET not in caplog.text
     assert "graph.threads.net" not in r.text
 

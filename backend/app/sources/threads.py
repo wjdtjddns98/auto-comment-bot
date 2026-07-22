@@ -461,8 +461,9 @@ async def oauth_exchange_code(code: str) -> dict:
             if not isinstance(long_token, str) or not long_token:
                 raise OAuthUpstreamError("장기 토큰 응답에 access_token 없음")
             try:
+                # OverflowError: float('inf') 류 이상값 방어(2차 리뷰 M1 — REPL 재현)
                 expires_in = max(0, int(body.get("expires_in") or 0))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 expires_in = 0
 
             # 3) 프로필 확보 — 안정 식별자(user id, upsert 키)와 판정 키(username).
@@ -471,10 +472,14 @@ async def oauth_exchange_code(code: str) -> dict:
             )
             _raise_for_oauth_status(resp)
             me = _json_dict(resp)
-            user_id = str(me.get("id") or "")
-            username = str(me.get("username") or "")
+            raw_id, raw_username = me.get("id"), me.get("username")
             # 안정 식별자 없이는 upsert 가 변경 가능한 username 에 의존하게 된다
-            # (1차 적대 리뷰 High-5 — username 탈취/변경 시 오연동 위험). 필수로 강제.
+            # (1차 적대 리뷰 High-5). 타입까지 fail-closed 로 강제(2차 리뷰 M2 —
+            # dict/list 등을 str() 로 뭉개 저장하지 않는다).
+            if not isinstance(raw_id, (str, int)) or not isinstance(raw_username, str):
+                raise OAuthUpstreamError("프로필 응답의 id/username 형식 이상")
+            user_id = str(raw_id)
+            username = raw_username
             if not user_id or not username:
                 raise OAuthUpstreamError("프로필 응답에 id/username 없음")
     except httpx.RequestError as exc:

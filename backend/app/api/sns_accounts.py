@@ -172,28 +172,33 @@ async def delete_account(
 
 # ── Threads OAuth 연동 (동의 화면 기반 — 앱 심사 스크린캐스트 요건) ──────────────────
 
-# state 저장소: state → (user_id, 만료 시각 epoch). in-memory 는 단일 워커 전제(NFR-P1)와
+# state 저장소: user_id → (state, 만료 monotonic). in-memory 는 단일 워커 전제(NFR-P1)와
 # 일치 — 재시작하면 진행 중이던 연동만 무효화된다(다시 연동하면 됨). 용도: 콜백 URL 로
 # 노출되는 code 를 다른 로그인 사용자가 자기 세션에 제출하는 것 차단(1차 적대 리뷰
-# High-3) — state 는 발급 사용자에게 바인딩되고 1회용이다.
+# High-3). **사용자당 미완료 state 1개**(재발급이 덮어씀) — 반복 발급으로 저장소가
+# 무한 성장하는 self-DoS 차단(2차 리뷰 High-1), 크기는 사용자 수로 자연 상한.
 _OAUTH_STATE_TTL_SEC = 600
-_oauth_states: dict[str, tuple[int, float]] = {}
+_oauth_states: dict[int, tuple[str, float]] = {}
 
 
 def _issue_oauth_state(user_id: int) -> str:
-    # 만료분 청소(누수 방지) — 호출 빈도가 낮아 전수 순회로 충분
-    now = time.monotonic()
-    for key in [k for k, (_, exp) in _oauth_states.items() if exp < now]:
-        _oauth_states.pop(key, None)
     state = secrets.token_urlsafe(32)
-    _oauth_states[state] = (user_id, now + _OAUTH_STATE_TTL_SEC)
+    _oauth_states[user_id] = (state, time.monotonic() + _OAUTH_STATE_TTL_SEC)
     return state
 
 
 def _consume_oauth_state(state: str, user_id: int) -> bool:
-    """1회용 소비 — 존재·미만료·발급 사용자 일치 시에만 True."""
-    entry = _oauth_states.pop(state, None)
-    return entry is not None and entry[0] == user_id and entry[1] >= time.monotonic()
+    """1회용 소비 — 소유자 일치·미만료 시에만 소비한다. 타인이 유출 state 를 제출해도
+    피해자의 정상 state 는 지워지지 않는다(2차 리뷰 Low-1 — 검증 후 pop)."""
+    entry = _oauth_states.get(user_id)
+    if (
+        entry is None
+        or not secrets.compare_digest(entry[0], state)
+        or entry[1] < time.monotonic()
+    ):
+        return False
+    _oauth_states.pop(user_id, None)
+    return True
 
 
 class ThreadsOAuthIn(BaseModel):
@@ -277,9 +282,11 @@ async def threads_oauth_connect(
         ) from exc
     except OAuthUpstreamError as exc:
         logger.warning("Threads OAuth 업스트림 장애: %s", exc)
+        # state 는 이미 소비됐고 코드도 소진됐을 수 있다 — 같은 요청 재시도가 아니라
+        # 처음부터 재연동을 안내한다(2차 리뷰 M4 — 문구·실동작 정합).
         raise HTTPException(
             status_code=502,
-            detail="Threads 연동 서버와 통신하지 못했습니다 — 잠시 후 다시 시도해 주세요",
+            detail="Threads 연동 서버와 통신하지 못했습니다 — 처음부터 다시 연동해 주세요",
         ) from exc
     try:
         ciphertext = crypto.encrypt_credentials({"access_token": result["access_token"]})
