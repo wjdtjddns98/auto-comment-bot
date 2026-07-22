@@ -239,6 +239,61 @@ async def test_publish_200_without_id_is_unknown(threads_setup, monkeypatch):
 
 
 @db
+async def test_publish_not_ready_retries_same_container(threads_setup, monkeypatch):
+    """생성 직후 400 code=24(컨테이너 준비 전) → 같은 creation_id 로 재시도해 성공.
+    재호출은 idempotent 라 이중 게시 경로가 없다(R3 실측 2026-07-22, 설계 §1)."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    publish_responses = [
+        (400, {"error": {"code": 24, "type": "OAuthException"}}),
+        (200, {"id": "M1"}),
+    ]
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/v1.0/me":
+            return httpx.Response(200, json={"id": "u1", "username": "our_bot"})
+        if request.url.path == "/v1.0/me/threads":
+            return httpx.Response(200, json={"id": "C1"})
+        status, body = publish_responses.pop(0)
+        return httpx.Response(status, json=body)
+
+    def _mock_client() -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=threads._API, timeout=1.0, transport=httpx.MockTransport(handler)
+        )
+
+    monkeypatch.setattr(threads, "_client", _mock_client)
+    media_id = await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert media_id == "M1"
+    # 컨테이너 생성은 1회뿐 — 재시도는 같은 creation_id 의 publish 재호출로만
+    assert sum(1 for r in requests if r.url.path == "/v1.0/me/threads") == 1
+    publishes = [r for r in requests if r.url.path == "/v1.0/me/threads_publish"]
+    assert len(publishes) == 2
+    assert all(b"creation_id=C1" in (r.content or b"") for r in publishes)
+
+
+@db
+async def test_publish_not_ready_exhausted_is_definite(threads_setup, monkeypatch):
+    """재시도 소진까지 400 code=24 → 확정 실패(SendError) — "컨테이너를 찾지 못함"은
+    발행 미수행 보장(R3 실측). verify_pending 5분 대기 없이 즉시 retry 가 열린다."""
+    account, source, post = threads_setup
+    monkeypatch.setattr(threads, "_PUBLISH_RETRY_DELAYS", (0.0, 0.0))
+    rec = Recorder({
+        ("GET", "/v1.0/me"): (200, {"id": "u1", "username": "our_bot"}),
+        ("POST", "/v1.0/me/threads"): (200, {"id": "C1"}),
+        ("POST", "/v1.0/me/threads_publish"):
+            (400, {"error": {"code": 24, "type": "OAuthException"}}),
+    })
+    rec.install(monkeypatch)
+    with pytest.raises(SendError) as exc_info:
+        await ADAPTER.send_reply(source, post, "안녕하세요", account)
+    assert sum(1 for r in rec.requests if r.url.path == "/v1.0/me/threads_publish") == 3
+    assert TOKEN not in str(exc_info.value)
+
+
+@db
 async def test_publish_timeout_is_unknown(threads_setup, monkeypatch):
     account, source, post = threads_setup
     rec = Recorder({
