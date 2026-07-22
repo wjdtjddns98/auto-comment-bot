@@ -72,7 +72,8 @@ async def reconcile_tick() -> None:
             fetch_ok.add(post.source_id)
     # 조정 전용 실패 상태 갱신(2차 리뷰 R-2) — poller 의 수집 성공이 health 를 ok 로
     # 되돌리지 않게 하는 플래그. 틱 단위 집계라 같은 소스에 성공/실패 행이 섞여도
-    # 실패가 하나라도 있으면 유지된다. 조정 대상이 사라진 소스는 해제(영구 잔류 방지).
+    # 실패가 하나라도 있으면 유지된다. 조정 대상이 사라진 소스는 해제(영구 잔류 방지 —
+    # active 는 틱 시작 스냅샷이라 틱 도중 종결분은 다음 틱, 즉 ≤60초 지연 해제).
     active = {post.source_id for post in rows}
     poller._reconcile_failing &= active
     poller._reconcile_failing |= fetch_failed
@@ -139,6 +140,11 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         # 401/403(토큰 만료) 포함 조회 실패 — attempts 미증가, 다음 주기 재시도.
         # read-only 라 반복해도 부작용 없음. 지속되면 사람이 ignore 로 종결(설계 §3.4-5).
         # health 회계로 소스 배지에 가시화한다(FR-18, 1차 적대 리뷰 F-3) — 원문은 로그에만.
+        # 플래그는 틱말 배치가 아니라 **지금 즉시** 세운다(PR #43 검증 리뷰 High-1) —
+        # 배치 반영까지의 창 동안 동시 실행된 poll_tick 의 수집 성공이 아래 degraded
+        # 회계를 ok 로 덮는 레이스 차단. 아래 await 전의 동기 실행이라 창이 닫힌다.
+        # 틱말 배치와도 일관: 이 행은 fetch_failed 로 집계돼 플래그가 유지된다.
+        poller._reconcile_failing.add(source.id)
         logger.exception("조정 조회 실패 match=%s source=%s", post.id, source.id)
         # 조회 대기 중 poller 가 건 backoff 를 stale 객체 회계(backoff_until=None 저장)로
         # 지우지 않는다(2차 리뷰 R-1) — 활성 backoff 가 있으면 health 회계를 생략한다.

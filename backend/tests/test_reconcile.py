@@ -328,6 +328,26 @@ async def test_reconcile_rate_limited_no_reconcile_flag(verify_pending_match, mo
 
 
 @pytest.mark.db
+async def test_reconcile_fetch_failure_flags_immediately(verify_pending_match, monkeypatch):
+    """조회 실패 플래그는 틱말 배치가 아니라 행 처리 시점에 즉시 선다(PR #43 검증 리뷰
+    High-1) — 배치 반영까지의 창 동안 동시 실행된 poll_tick 의 수집 성공이 방금 기록한
+    degraded 를 ok 로 덮는 레이스 차단."""
+    from app import poller
+    from app import sources as sources_registry
+    from app.sources import FetchError
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    adapter = FakeVerifyAdapter(error=FetchError("mock 조회 실패"))
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_post(match)  # tick 의 틱말 배치를 거치지 않는 행 단위 호출
+
+    assert match.source_id in poller._reconcile_failing
+
+
+@pytest.mark.db
 async def test_reviewer_delete_blocked_by_audit_restrict(verify_pending_match):
     """감사 이력이 있는 reviewer 는 하드삭제가 DB 에서 거부된다(RESTRICT — R-5 방어 확인).
     사용자 삭제 기능 도입 시 전제조건은 models.ReplyActionLog.reviewer 주석 참조."""
