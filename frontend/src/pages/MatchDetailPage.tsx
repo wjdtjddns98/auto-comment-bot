@@ -268,7 +268,7 @@ export default function MatchDetailPage() {
                 재시도
               </Button>
             )}
-            <Button variant="danger" onClick={() => ignoreMutation.mutate()} disabled={ignoreMutation.isPending}>
+            <Button variant="secondary" onClick={() => ignoreMutation.mutate()} disabled={ignoreMutation.isPending}>
               무시
             </Button>
           </div>
@@ -288,7 +288,7 @@ export default function MatchDetailPage() {
             자동 전환됩니다. 조정이 오래 걸리면 무시로 종료할 수 있습니다.
           </p>
           <div>
-            <Button variant="danger" onClick={() => ignoreMutation.mutate()} disabled={ignoreMutation.isPending}>
+            <Button variant="secondary" onClick={() => ignoreMutation.mutate()} disabled={ignoreMutation.isPending}>
               무시
             </Button>
           </div>
