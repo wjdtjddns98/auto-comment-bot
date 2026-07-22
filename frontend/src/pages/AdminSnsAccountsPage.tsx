@@ -1,10 +1,15 @@
 import { Fragment, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { createSnsAccount, deleteSnsAccount, getSnsAccounts } from "../lib/apiClient";
+import {
+  createSnsAccount,
+  deleteSnsAccount,
+  getSnsAccounts,
+  updateSnsAccountCredentials,
+} from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
 import { formatDateTime, SOURCE_TYPE_LABEL } from "../lib/matchDisplay";
 import { useAuth } from "../hooks/useAuth";
-import type { SnsPlatform } from "../types/api";
+import type { SnsAccount, SnsPlatform } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -108,6 +113,84 @@ function CreateSnsAccountForm() {
   );
 }
 
+function ReplaceCredentialsForm({
+  account,
+  columnCount,
+  onDone,
+}: {
+  account: SnsAccount;
+  columnCount: number;
+  onDone: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const [accessToken, setAccessToken] = useState("");
+  const [credentials, setCredentials] = useState("{}");
+  const [error, setError] = useState<string | null>(null);
+  const isThreads = account.platform === "threads";
+
+  const mutation = useMutation({
+    mutationFn: (body: Record<string, unknown>) =>
+      updateSnsAccountCredentials(account.id, { credentials: body }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["snsAccounts"] });
+      onDone();
+    },
+    onError: (err) => setError(describeApiError(err)),
+  });
+
+  function handleSubmit() {
+    if (isThreads) {
+      if (!accessToken.trim()) {
+        setError("액세스 토큰을 입력하세요.");
+        return;
+      }
+      mutation.mutate({ access_token: accessToken.trim() });
+      return;
+    }
+    let parsedCredentials: Record<string, unknown>;
+    try {
+      parsedCredentials = JSON.parse(credentials);
+    } catch {
+      setError("자격증명은 올바른 JSON이어야 합니다.");
+      return;
+    }
+    mutation.mutate(parsedCredentials);
+  }
+
+  return (
+    <Tr>
+      <Td colSpan={columnCount} className="bg-gray-50">
+        <div className="flex flex-wrap items-end gap-3 py-2">
+          {isThreads ? (
+            <Field label="새 액세스 토큰">
+              <Input
+                type="password"
+                autoComplete="off"
+                placeholder="threads 액세스 토큰"
+                value={accessToken}
+                onChange={(e) => setAccessToken(e.target.value)}
+              />
+            </Field>
+          ) : (
+            <Field label="새 자격증명 (JSON)">
+              <Textarea rows={3} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+            </Field>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" onClick={handleSubmit} disabled={mutation.isPending}>
+              {mutation.isPending ? "교체 중…" : "교체"}
+            </Button>
+            <Button size="sm" variant="ghost" onClick={onDone} disabled={mutation.isPending}>
+              취소
+            </Button>
+          </div>
+          {error && <p className="text-sm text-tone-danger">{error}</p>}
+        </div>
+      </Td>
+    </Tr>
+  );
+}
+
 export default function AdminSnsAccountsPage() {
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -117,6 +200,7 @@ export default function AdminSnsAccountsPage() {
     queryFn: getSnsAccounts,
   });
   const [rowError, setRowError] = useState<{ id: number; message: string } | null>(null);
+  const [replacingId, setReplacingId] = useState<number | null>(null);
 
   const deleteMutation = useMutation({
     mutationFn: (id: number) => deleteSnsAccount(id),
@@ -183,16 +267,35 @@ export default function AdminSnsAccountsPage() {
                   </Td>
                   <Td>{formatDateTime(account.token_expires_at)}</Td>
                   <Td>
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      disabled={deleteMutation.isPending || (isAdmin && account.user_id !== user?.id)}
-                      onClick={() => deleteMutation.mutate(account.id)}
-                    >
-                      삭제
-                    </Button>
+                    <div className="flex justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="secondary"
+                        disabled={isAdmin && account.user_id !== user?.id}
+                        onClick={() =>
+                          setReplacingId((cur) => (cur === account.id ? null : account.id))
+                        }
+                      >
+                        토큰 교체
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="danger"
+                        disabled={deleteMutation.isPending || (isAdmin && account.user_id !== user?.id)}
+                        onClick={() => deleteMutation.mutate(account.id)}
+                      >
+                        삭제
+                      </Button>
+                    </div>
                   </Td>
                 </Tr>
+                {replacingId === account.id && (
+                  <ReplaceCredentialsForm
+                    account={account}
+                    columnCount={columnCount}
+                    onDone={() => setReplacingId(null)}
+                  />
+                )}
                 {rowError?.id === account.id && (
                   <Tr>
                     <Td colSpan={columnCount} className="text-sm text-tone-danger">

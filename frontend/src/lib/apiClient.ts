@@ -17,6 +17,7 @@ import type {
   Source,
   SnsAccount,
   Template,
+  UpdateSnsAccountCredentialsRequest,
   User,
 } from "../types/api";
 import { MockApiError, mockRequest } from "./mock/mockServer";
@@ -194,6 +195,8 @@ export const createSnsAccount = (body: CreateSnsAccountRequest) =>
   request<SnsAccount>("/api/sns-accounts", { method: "POST", body });
 export const deleteSnsAccount = (id: number) =>
   request<void>(`/api/sns-accounts/${id}`, { method: "DELETE" });
+export const updateSnsAccountCredentials = (id: number, body: UpdateSnsAccountCredentialsRequest) =>
+  request<void>(`/api/sns-accounts/${id}/credentials`, { method: "PUT", body });
 
 // --- 감사 로그 ---
 export const getReplyActions = (matchId: number) =>

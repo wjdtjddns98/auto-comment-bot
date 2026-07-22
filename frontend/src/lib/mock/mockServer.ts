@@ -401,6 +401,23 @@ function handleDeleteSnsAccount(id: number): void {
   snsAccounts.splice(idx, 1);
 }
 
+function handleUpdateSnsAccountCredentials(id: number, body: unknown): void {
+  const user = requireUser();
+  const record = snsAccounts.find((a) => a.id === id);
+  // 본인 것만 교체 가능(admin 은 전체) · 타인 것은 존재 여부 비노출로 404(이슈 #40).
+  if (!record || (user.role !== "admin" && record.user_id !== user.id)) {
+    throw new MockApiError(404, "SNS 계정을 찾을 수 없습니다.");
+  }
+  const req = (body ?? {}) as { credentials?: Record<string, unknown> };
+  const token = req.credentials?.access_token;
+  if (record.platform === "threads" && (typeof token !== "string" || !token.trim())) {
+    throw new MockApiError(422, "credentials.access_token: threads 계정은 액세스 토큰(문자열)이 필요합니다");
+  }
+  // credentials 는 실제로는 서버가 즉시 암호화해 재저장 — 모의 서버는 보관하지 않는다.
+  record.status = "active";
+  record.token_expires_at = null;
+}
+
 // ---- 감사 로그 ----
 
 function handleGetReplyActions(query: MockRequestOptions["query"]): ReplyAction[] {
@@ -508,6 +525,11 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
     method: "DELETE",
     pattern: /^\/api\/sns-accounts\/(?<id>\d+)$/,
     handler: (p) => handleDeleteSnsAccount(Number(p.id)),
+  },
+  {
+    method: "PUT",
+    pattern: /^\/api\/sns-accounts\/(?<id>\d+)\/credentials$/,
+    handler: (p, _q, body) => handleUpdateSnsAccountCredentials(Number(p.id), body),
   },
 
   { method: "GET", pattern: /^\/api\/reply-actions$/, handler: (_p, q) => handleGetReplyActions(q) },
