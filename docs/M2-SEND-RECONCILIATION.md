@@ -216,8 +216,11 @@ sweep(`reply.py::sweep_stuck_sending`)은 회수 대상을 **분기**한다(현�
       전이라 확정 실패로 안전), Protocol 명시 상속 없음(덕타이핑), publish 확정 실패는
       401/403/429 + 400 의 유효성/OAuth 계열 code 만(§3.2 세분 규칙) — 그 외 전부 결과 불명
       (fail-safe).
-      잔여(후속): OAuth 콜백(API-SPEC §SNS 계정, OQ-2 심사 후), 조정 전용 실패 health 깜빡임
-      (2차 리뷰 R-2), 사용자 삭제 기능 도입 시 reviewer FK 방어(R-5)
+      잔여(후속): OAuth 콜백(API-SPEC §SNS 계정, OQ-2 심사 후).
+      — 2차 리뷰 R-2(조정 전용 실패 health 깜빡임)·R-5(reviewer FK 방어)는 2026-07-22
+      처리 완료: R-2 는 poller `_reconcile_failing` 틱 집계로 수집 성공의 ok 복귀를 억제,
+      R-5 는 RESTRICT 실PG 회귀 테스트 + verify_meta.reviewer_id 잔여 경로 주석
+      (`models.ReplyActionLog.reviewer`) 으로 고정
 - [ ] R8. **조정 1차 수단 승격**(R3 실측 근거): 조정 잡이 verify_meta 의 `container_id` 로
       `threads_publish` 를 재호출 — 200 + media id 면 그 id 로 즉시 sent 확정(텍스트 판정
       불필요·§3.6 잔여창 폐쇄), 컨테이너 만료(24h)·재호출 불가 시에만 현행 텍스트 판정 폴백.
