@@ -159,7 +159,8 @@ class MatchedPost(Model):
     status = fields.CharEnumField(PostStatus, max_length=16, default=PostStatus.new)
     sending_claimed_at = fields.DatetimeField(null=True)  # sweep 회수용 (MUST-FIX #4)
     # 조정 재료(M2 조정 설계 §3.1) — CAS 클레임 시 기록, 종결 시 null 청소. 비밀 없음.
-    # {target_media_id, claim_ts, attempts, reviewer_id, final_body, sns_account_id, container_id?}
+    # {target_media_id, claim_ts, attempts, reviewer_id, final_body, sns_account_id,
+    #  container_id?, platform_username?(결과 불명 시점 판정 키 스냅샷 — 교체 오염 방지)}
     verify_meta = fields.JSONField(null=True)
 
     class Meta:

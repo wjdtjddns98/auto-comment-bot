@@ -368,6 +368,8 @@ async def test_send_timeout_goes_verify_pending(reviewer_session, monkeypatch):
         assert match.verify_meta["reviewer_id"] == user.id
         assert match.verify_meta["final_body"] == "본문"
         assert match.verify_meta["sns_account_id"] == account.id
+        # 판정 키 스냅샷(토큰 교체 3차 리뷰 blocker) — 타임아웃 경로도 기록된다
+        assert match.verify_meta["platform_username"] == "our_bot"
     finally:
         await _cleanup(match)
         await account.delete()
@@ -392,6 +394,8 @@ async def test_unknown_outcome_gates_and_ignore_escape(reviewer_session, monkeyp
         await match.refresh_from_db()
         assert match.status == PostStatus.verify_pending
         assert match.verify_meta["container_id"] == "mock-container-1"
+        # 판정 키 스냅샷 — 이후 자격증명 교체(신원 교체)가 조정 판정을 오염시키지 않는다
+        assert match.verify_meta["platform_username"] == "our_bot"
 
         # 결과 불명 상태에서 재전송 경로는 구조적으로 닫혀 있다(CAS 클레임 대상 아님)
         for path in ("approve", "retry"):

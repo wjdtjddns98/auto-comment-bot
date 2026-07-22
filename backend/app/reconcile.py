@@ -94,7 +94,14 @@ async def reconcile_post(post: MatchedPost) -> None:
     account = None
     if meta.get("sns_account_id") is not None:
         account = await SnsAccount.get_or_none(id=meta["sns_account_id"])
-    username = account.platform_username if account else None
+    # 판정 키는 결과 불명 시점의 스냅샷(verify_meta.platform_username)을 우선한다
+    # (토큰 교체 API 3차 독립 리뷰 blocker — 스냅샷 이후의 자격증명 교체가 신원을 바꿔
+    # "실제 게시됨"을 미게시로 오판하는 것 방지). 스냅샷 없는 행(크래시 잔재 등)은
+    # 종전대로 live 값 폴백 — 핸들 변경(rename)에는 live 가 유리(어댑터 2차 리뷰 중요-1).
+    # "크래시+교체" 복합 잔여 위험은 설계 §3.6 참조.
+    username = meta.get("platform_username") or (
+        account.platform_username if account else None
+    )
     if not username:
         # username 없이는 판정 불가(설계 §3.1) — 계정 삭제/미저장. 사람 탈출구는 ignore.
         logger.error("조정 불가: 판정용 platform_username 없음 match=%s", post.id)

@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
@@ -41,6 +41,9 @@ class SnsAccountIn(BaseModel):
 
 
 class CredentialsIn(BaseModel):
+    # extra 금지: platform 등 미지 키를 조용히 무시하지 않는다(교체는 자격증명만 받는다)
+    model_config = ConfigDict(extra="forbid")
+
     credentials: dict[str, Any]
 
 
@@ -125,19 +128,26 @@ async def replace_credentials(
         ) from exc
     try:
         async with in_transaction():
-            updated = await SnsAccountSecret.filter(account_id=account.id).update(
+            # 락 순서 정렬(3차 독립 리뷰 중요): 부모(sns_accounts) 행을 먼저 잠근다 —
+            # DELETE(부모 삭제 → cascade 자식)와 같은 parent→child 순서. 반대 순서
+            # (secret 먼저)는 동시 삭제와 AB-BA 데드락(40P01)이 가능하고, 데드락 예외는
+            # IntegrityError 로 변환되지 않아 500 이 된다(asyncpg 예외 계층 실확인).
+            locked = await SnsAccount.filter(id=account.id).select_for_update().first()
+            if locked is None:
+                raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
+            updated = await SnsAccountSecret.filter(account_id=locked.id).update(
                 encrypted_credentials=ciphertext
             )
             if not updated:
                 # 등록 경로는 secret 을 항상 만들지만, 결손 데이터도 교체가 복구한다(upsert)
                 await SnsAccountSecret.create(
-                    account=account, encrypted_credentials=ciphertext
+                    account=locked, encrypted_credentials=ciphertext
                 )
-            account.status = AccountStatus.active
-            account.token_expires_at = None
-            await account.save(update_fields=["status", "token_expires_at"])
+            locked.status = AccountStatus.active
+            locked.token_expires_at = None
+            await locked.save(update_fields=["status", "token_expires_at"])
     except IntegrityError as exc:
-        # 삭제/동시 교체와의 미시적 경합 — 트랜잭션 롤백으로 부분 반영 없음
+        # 동시 교체 경합의 잔여 창(부모 락 이후의 unique/FK 충돌) — 롤백으로 부분 반영 없음
         raise HTTPException(
             status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
         ) from exc

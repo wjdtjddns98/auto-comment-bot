@@ -102,10 +102,11 @@ Req `{ credentials: {...} }` → 204 (본문 없음).
 → **삭제→재등록→소스 재연결 없이** 자격증명만 교체한다(토큰 만료/재발급 대응).
 → 등록과 동일한 플랫폼별 형식 검증: `threads` 는 `credentials.access_token`(비어 있지 않은
   문자열) 필수 — 누락/오형식 422(입력값 echo 없음). platform 은 저장된 계정 값 기준(전환 불가).
-→ 교체 성공 시 `status` 가 `active` 로 복구되고 `token_expires_at` 은 null 로 초기화 —
-  새 토큰이 무효하면 이후 수집/전송 시점에 다시 상태 회계가 이뤄진다.
+→ 교체 성공 시 `status` 가 `active` 로 복구되고 `token_expires_at` 은 null 로 초기화.
+  (참고: 현재 만료/회수 상태의 **자동 회계는 미구현** — status 는 이 복구 외에는 향후 OAuth
+  흐름에서만 변한다. 무효 토큰은 수집/전송 실패와 소스 health 배지로 드러난다.)
 → 본인 계정만(admin 은 전체) · 타인 것은 404 · 암호화 키 미설정 503(등록과 동일) ·
-  삭제와의 동시 경합은 409(재시도 안내).
+  삭제와의 동시 경합은 404 또는 409(재시도 안내) · body 에 credentials 외 키는 422.
 
 ### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
 

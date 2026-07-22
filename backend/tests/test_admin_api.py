@@ -480,7 +480,45 @@ async def test_sns_account_credentials_replace(admin_session, monkeypatch):
     assert r.status_code == 204
     assert await SnsAccountSecret.get_or_none(account_id=account_id) is not None
 
+    # 존재하지 않는 계정 → 404 (타인 계정과 동일 표면 — 존재 비노출)
+    r = await client.put(
+        "/api/sns-accounts/999999/credentials",
+        json={"credentials": {"access_token": "tok-x"}},
+        headers=csrf,
+    )
+    assert r.status_code == 404
+
+    # credentials 외 키 → 422 (extra 금지 — platform 전환 시도 등 조용한 무시 방지)
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": "tok-x"}, "platform": "naver"},
+        headers=csrf,
+    )
+    assert r.status_code == 422
+
     assert (await client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)).status_code == 204
+
+
+async def test_sns_account_credentials_replace_without_key_503(admin_session, monkeypatch):
+    """교체도 등록과 동일 — 암호화 키 미설정이면 503(자격증명을 평문으로 받아두지 않는다)."""
+    client, csrf = admin_session
+    monkeypatch.setattr(settings, "credentials_fernet_keys", Fernet.generate_key().decode())
+    r = await client.post(
+        "/api/sns-accounts",
+        json={"platform": "threads", "display_name": "키테스트",
+              "credentials": {"access_token": "tok-1"}},
+        headers=csrf,
+    )
+    account_id = r.json()["id"]
+    monkeypatch.setattr(settings, "credentials_fernet_keys", "")
+    r = await client.put(
+        f"/api/sns-accounts/{account_id}/credentials",
+        json={"credentials": {"access_token": "tok-2"}},
+        headers=csrf,
+    )
+    assert r.status_code == 503
+    assert "tok-2" not in r.text
+    await client.delete(f"/api/sns-accounts/{account_id}", headers=csrf)
 
 
 async def test_sns_account_credentials_replace_scoped_to_owner(admin_session, monkeypatch):
