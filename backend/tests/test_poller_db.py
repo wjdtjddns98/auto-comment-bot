@@ -150,6 +150,18 @@ async def test_poll_success_preserves_concurrent_reconcile_backoff(env, monkeypa
     assert fresh.last_success_at is not None  # 수집 회계(커서 전진)는 정상
 
 
+async def test_poll_failure_does_not_downgrade_reconcile_down(env, monkeypatch):
+    """R9① 회귀: 조정 지속 실패로 down 도달한 소스에 poll 실패 1회가 겹쳐도 degraded 로
+    역전되지 않는다 — health 는 poll/조정 두 카운터의 최대 기준."""
+    source, _, fake = env
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {source.id: 5})
+    fake.result = FetchError("down")
+
+    await poller.poll_source(source)
+
+    assert source.health_status == HealthStatus.down
+
+
 async def test_store_failure_is_accounted(env, monkeypatch):
     """저장 단계 실패도 fetch 실패와 동일하게 회계된다(커서 미전진 + degraded)."""
     source, _, fake = env

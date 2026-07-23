@@ -78,6 +78,11 @@ async def reconcile_tick() -> None:
     poller._reconcile_failing &= active
     poller._reconcile_failing |= fetch_failed
     poller._reconcile_failing -= fetch_ok - fetch_failed
+    # 조정 실패 카운터(R9①) 해제 — 플래그와 같은 기준: 이번 틱 실패 없이 조회 성공했거나
+    # 조정 대상이 사라진 소스만. 429 로 backoff 중(outcome None)인 소스는 유지된다.
+    for source_id in list(poller._reconcile_fail_counts):
+        if source_id not in active or source_id in fetch_ok - fetch_failed:
+            poller._reconcile_fail_counts.pop(source_id, None)
 
 
 async def reconcile_post(post: MatchedPost) -> str | None:
@@ -132,8 +137,10 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         replies = await fetch_replies(source, target_media_id, account, since)
     except RateLimitedError as exc:
         await source.refresh_from_db()  # 조회 대기 중의 회계 변경을 덮지 않게(2차 리뷰 R-1)
+        # reconcile=True: 조정 전용 카운터 — 수집 성공이 리셋하지 못해 지속 429 의
+        # 지수 backoff 가 최소치로 되돌아가지 않는다(R9①).
         await poller._record_failure(
-            source, retry_after_sec=exc.retry_after_sec, rate_limited=True
+            source, retry_after_sec=exc.retry_after_sec, rate_limited=True, reconcile=True
         )
         return
     except Exception:
@@ -150,7 +157,9 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         # 지우지 않는다(2차 리뷰 R-1) — 활성 backoff 가 있으면 health 회계를 생략한다.
         await source.refresh_from_db()
         if not (source.backoff_until and source.backoff_until > datetime.now(UTC)):
-            await poller._record_failure(source, retry_after_sec=None, rate_limited=False)
+            await poller._record_failure(
+                source, retry_after_sec=None, rate_limited=False, reconcile=True
+            )
         return "fetch_failed"
 
     final_body = meta.get("final_body") or ""
@@ -163,7 +172,14 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         None,
     )
     if found is not None:
-        await _settle_sent(post, meta, found)
+        try:
+            await _settle_sent(post, meta, found)
+        except Exception:
+            # 종결 회계 실패(R9②): 트랜잭션 롤백으로 verify_pending 이 유지되므로 전송
+            # 안전성은 불변 — 다음 주기가 재시도한다. 조회 자체는 성공했으므로 fetch_ok
+            # 로 집계해, _reconcile_failing 해제가 기존 플래그 유무에 따라 지연되는
+            # 이력 의존 동작을 없앤다.
+            logger.exception("조정 종결(sent 회계) 실패 match=%s — 다음 주기 재시도", post.id)
         return "fetch_ok"
 
     attempts = int(meta.get("attempts", 0)) + 1
