@@ -112,7 +112,9 @@ async def poll_source(source: Source) -> int:
         fields.append("backoff_until")
         # 조정 조회가 실패 중이면 health 는 건드리지 않는다(R-2 깜빡임 방지) — 이 객체의
         # health 값 자체가 stale 일 수 있으므로 조건부 대입이 아니라 저장 필드에서 제외한다.
-        if source.id not in _reconcile_failing:
+        # 카운터도 함께 확인한다(R9 2차 리뷰 High-1): 429 조정 실패는 플래그를 세우지
+        # 않으므로 플래그만 보면 backoff 만료 직후 수집 성공이 down 을 ok 로 되돌린다.
+        if source.id not in _reconcile_failing and not _reconcile_fail_counts.get(source.id):
             source.health_status = HealthStatus.ok
             fields.append("health_status")
     await source.save(update_fields=fields)

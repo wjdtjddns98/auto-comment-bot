@@ -56,9 +56,14 @@ def is_our_reply(
 
 async def reconcile_tick() -> None:
     """스케줄러 진입점 — verify_pending 전건 순차 조정 + 조정 실패 상태 집계(R-2)."""
-    rows = await MatchedPost.filter(status=PostStatus.verify_pending).prefetch_related("source")
+    rows = (
+        await MatchedPost.filter(status=PostStatus.verify_pending)
+        .order_by("id")  # 처리 순서 고정 — 틱말 집계의 재현성(R9 2차 리뷰 High-2 회귀 테스트)
+        .prefetch_related("source")
+    )
     fetch_failed: set[int] = set()
     fetch_ok: set[int] = set()
+    rate_limited: set[int] = set()
     for post in rows:
         try:
             outcome = await reconcile_post(post)
@@ -70,6 +75,8 @@ async def reconcile_tick() -> None:
             fetch_failed.add(post.source_id)
         elif outcome == "fetch_ok":
             fetch_ok.add(post.source_id)
+        elif outcome == "rate_limited":
+            rate_limited.add(post.source_id)
     # 조정 전용 실패 상태 갱신(2차 리뷰 R-2) — poller 의 수집 성공이 health 를 ok 로
     # 되돌리지 않게 하는 플래그. 틱 단위 집계라 같은 소스에 성공/실패 행이 섞여도
     # 실패가 하나라도 있으면 유지된다. 조정 대상이 사라진 소스는 해제(영구 잔류 방지 —
@@ -78,16 +85,19 @@ async def reconcile_tick() -> None:
     poller._reconcile_failing &= active
     poller._reconcile_failing |= fetch_failed
     poller._reconcile_failing -= fetch_ok - fetch_failed
-    # 조정 실패 카운터(R9①) 해제 — 플래그와 같은 기준: 이번 틱 실패 없이 조회 성공했거나
-    # 조정 대상이 사라진 소스만. 429 로 backoff 중(outcome None)인 소스는 유지된다.
+    # 조정 실패 카운터(R9①) 해제 — 이번 틱에 실패(일반·429 모두) 없이 조회 성공했거나
+    # 조정 대상이 사라진 소스만. 같은 틱의 다른 행 성공이 방금 증가한 429 카운터를
+    # 지우지 않게 rate_limited 도 보호한다(2차 리뷰 High-2). backoff 중(outcome None)
+    # 인 소스도 유지된다.
     for source_id in list(poller._reconcile_fail_counts):
-        if source_id not in active or source_id in fetch_ok - fetch_failed:
+        if source_id not in active or source_id in fetch_ok - fetch_failed - rate_limited:
             poller._reconcile_fail_counts.pop(source_id, None)
 
 
 async def reconcile_post(post: MatchedPost) -> str | None:
-    """행 1건 조정. 반환은 R-2 집계 재료: "fetch_ok"(조회 성공)·"fetch_failed"(조정 전용
-    조회 실패)·None(조회 미도달/rate-limit — 공유 backoff 회계라 조정 전용이 아님)."""
+    """행 1건 조정. 반환은 R-2/R9 집계 재료: "fetch_ok"(조회 성공)·"fetch_failed"(조정
+    전용 조회 실패)·"rate_limited"(429 — 공유 backoff 회계지만 조정 실패 카운터는 유지)
+    ·None(조회 미도달)."""
     meta = post.verify_meta
     try:
         # 재료 검증은 조회 호출 전에 전부 — malformed meta 행이 매 틱 실 API 호출을
@@ -142,7 +152,7 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         await poller._record_failure(
             source, retry_after_sec=exc.retry_after_sec, rate_limited=True, reconcile=True
         )
-        return
+        return "rate_limited"
     except Exception:
         # 401/403(토큰 만료) 포함 조회 실패 — attempts 미증가, 다음 주기 재시도.
         # read-only 라 반복해도 부작용 없음. 지속되면 사람이 ignore 로 종결(설계 §3.4-5).
@@ -199,18 +209,24 @@ async def reconcile_post(post: MatchedPost) -> str | None:
         logger.warning("조정: sent 증거 발견 — 미게시 판정 대신 replied 정합 회복 match=%s", post.id)
         return "fetch_ok"
     # 미게시 판정(설계 §3.4-4): retry 재개. 오판 잔여 위험은 §3.6 — FE 문구가 최종 방어선.
-    async with in_transaction():
-        await ReplyActionLog.create(
-            matched_post_id=post.id,
-            reviewer_id=meta["reviewer_id"],
-            final_body=final_body,
-            action=ReplyAction.failed,
-            sns_account_id=meta.get("sns_account_id"),
-            error="조정 완료 — 미게시 판정. 재시도 전 대상 글에서 직접 확인을 권장합니다",
-        )
-        await MatchedPost.filter(id=post.id, status=PostStatus.verify_pending).update(
-            status=PostStatus.reviewing, verify_meta=None
-        )
+    try:
+        async with in_transaction():
+            await ReplyActionLog.create(
+                matched_post_id=post.id,
+                reviewer_id=meta["reviewer_id"],
+                final_body=final_body,
+                action=ReplyAction.failed,
+                sns_account_id=meta.get("sns_account_id"),
+                error="조정 완료 — 미게시 판정. 재시도 전 대상 글에서 직접 확인을 권장합니다",
+            )
+            await MatchedPost.filter(id=post.id, status=PostStatus.verify_pending).update(
+                status=PostStatus.reviewing, verify_meta=None
+            )
+    except Exception:
+        # R9② 대칭(2차 리뷰 High-3): 회계 실패(reviewer FK 등)도 롤백 → verify_pending
+        # 유지(다음 주기 재시도). 조회는 성공했으므로 fetch_ok 로 집계한다.
+        logger.exception("조정 미게시 판정 회계 실패 match=%s — 다음 주기 재시도", post.id)
+        return "fetch_ok"
     logger.info("조정 미게시 판정 match=%s attempts=%d → reviewing", post.id, attempts)
     return "fetch_ok"
 

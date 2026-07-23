@@ -255,6 +255,13 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       reconcile_tick 틱말 집계(플래그와 동일 기준)·forget_source. ② 는 최소안 그대로.
       회귀 테스트 3건(429 backoff 지수 유지·down 역전 방지·settle 실패 시 플래그 해제) —
       옛 코드에서 3건 모두 실패 확인.
+      — **2차 독립 리뷰(codex, 2026-07-23) High 3건 반영**: poll 성공의 ok 복귀 조건에
+      조정 실패 카운터 추가(429 는 플래그를 안 세워 플래그만으론 down→ok 깜빡임 재발),
+      429 를 `"rate_limited"` outcome 으로 명시해 틱말 pop 에서 보호(같은 틱 mixed
+      outcome 이 방금 증가한 카운터를 지우던 구멍 — 처리 순서도 `order_by(id)` 고정),
+      미게시 판정 회계에도 ② 예외 흡수를 대칭 적용(reviewer FK RESTRICT 로 동일하게
+      실패 가능). 회귀 테스트 3건 추가(총 6건) — 미수정 코드에서 3건 실패 재현.
+      리뷰 Medium-1(기존 TOCTOU)은 R11 로 분리.
 
 - [ ] R10. **Threads OAuth 잔여**(2차 적대 리뷰, 2026-07-22 — 병합 수용 판정, 후속):
       ① 수동 등록 계정(platform_user_id null)과 OAuth 재연동이 매칭되지 않아 계정 행이
@@ -263,6 +270,13 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       무효(400)"로 오분류될 여지(2차 L2, 실사용 가능성 낮음). ③ 테스트 공백: state
       위조 시 업스트림 0회·TTL 경계·2/3단계 RequestError·advisory lock 실동시성(2차 L3).
       ④ Dockerfile 이 --workers 1 을 암묵 보장 — in-memory state 의존 명시 검토(2차 L4).
+
+- [ ] R11. **`_record_failure` 일반 실패의 무조건 `backoff_until=None` 저장**(R9 2차 리뷰
+      Medium-1 — PR #63 이전부터 존재, 이번 범위 제외): poll↔reconcile 이 같은 루프에서
+      interleave 될 때 stale `Source` 객체의 일반 실패 회계가 다른 채널이 방금 건 미래
+      backoff 를 덮어쓸 수 있는 TOCTOU(불변식 ④). 성공 경로에 이미 있는 "미래 backoff
+      존중" 가드(poll_source 의 재조회)를 실패 경로에도 적용하거나, 조건부 원자 update
+      (`backoff_until__lte=now` 류)로 제한. 빈도 낮음(두 채널이 수초 내 교차 실패해야 발생).
 
 ## 참고 문서
 

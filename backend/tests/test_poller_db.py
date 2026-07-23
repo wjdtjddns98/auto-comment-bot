@@ -48,6 +48,7 @@ async def env(api_client, monkeypatch):
     fake = FakeAdapter()
     monkeypatch.setattr(poller, "get_adapter", lambda _type: fake)
     monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
     yield source, keyword, fake
     await MatchedPost.filter(source_id=source.id).delete()
     await Keyword.filter(id=keyword.id).delete()
@@ -147,6 +148,23 @@ async def test_poll_success_preserves_concurrent_reconcile_backoff(env, monkeypa
     fresh = await Source.get(id=source.id)
     assert fresh.backoff_until is not None  # 방금 걸린 backoff 유지
     assert fresh.health_status == HealthStatus.degraded  # ok 로 덮지 않는다
+    assert fresh.last_success_at is not None  # 수집 회계(커서 전진)는 정상
+
+
+async def test_poll_success_keeps_reconcile_down_health(env, monkeypatch):
+    """R9① 2차 회귀(High-1): 조정 429 지속으로 down 인 소스는 poll 성공이 health 를 ok 로
+    되돌리지 않는다 — 429 는 _reconcile_failing 플래그를 세우지 않으므로 ok 복귀 조건이
+    플래그뿐 아니라 조정 실패 카운터도 확인해야 한다."""
+    source, _, fake = env
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {source.id: 5})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    await Source.filter(id=source.id).update(health_status=HealthStatus.down)
+    fake.result = []
+
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.health_status == HealthStatus.down  # ok 로 깜빡이지 않는다
     assert fresh.last_success_at is not None  # 수집 회계(커서 전진)는 정상
 
 
