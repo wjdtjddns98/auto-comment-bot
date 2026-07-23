@@ -244,7 +244,9 @@ function SourceRow({ source }: { source: Source }) {
               onChange={(e) => setName(e.target.value)}
             />
           ) : (
-            <span className="text-gray-900">{getSourceDisplayName(source)}</span>
+            <span className="block whitespace-normal break-all text-gray-900">
+              {getSourceDisplayName(source)}
+            </span>
           )}
         </Td>
         <Td className="max-w-xs">
