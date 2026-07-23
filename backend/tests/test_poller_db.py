@@ -180,6 +180,46 @@ async def test_poll_failure_does_not_downgrade_reconcile_down(env, monkeypatch):
     assert source.health_status == HealthStatus.down
 
 
+async def test_poll_failure_preserves_concurrent_reconcile_backoff(env, monkeypatch):
+    """R11 회귀(R9 2차 리뷰 Medium-1): fetch 대기 중 조정 틱이 건 **미래** backoff 를
+    poll 일반 실패 회계(stale 객체의 backoff_until=None 저장)가 지우지 않는다(불변식 ④)."""
+    source, _, _ = env
+    future = datetime.now(UTC) + timedelta(minutes=5)
+
+    class ConcurrentBackoffThenFailAdapter:
+        can_write = False
+
+        async def fetch(self, _source, since):
+            # fetch I/O 대기 중 reconcile 의 429 회계가 끼어들고, 이어서 이 poll 은
+            # 일반 실패로 끝나는 교차 상황 재현 — backoff 는 DB 에만 반영돼 있다.
+            await Source.filter(id=source.id).update(
+                backoff_until=future, health_status=HealthStatus.degraded
+            )
+            raise FetchError("poll 일반 실패")
+
+    monkeypatch.setattr(poller, "get_adapter", lambda _t: ConcurrentBackoffThenFailAdapter())
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until == future  # 방금 걸린 미래 backoff 그대로 유지(독립 리뷰 L1)
+    assert fresh.health_status == HealthStatus.degraded  # 실패 회계 자체는 정상
+
+
+async def test_poll_failure_clears_expired_backoff(env):
+    """R11 가드의 반대 방향: 이미 **만료된** backoff 는 일반 실패 회계가 계속 정리한다 —
+    지나간 만료 시각이 API 에 남아 노출되지 않는다(기존 동작 보존)."""
+    source, _, fake = env
+    past = datetime.now(UTC) - timedelta(minutes=5)
+    await Source.filter(id=source.id).update(backoff_until=past)
+    source.backoff_until = past
+    fake.result = FetchError("일반 실패")
+
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until is None
+
+
 async def test_store_failure_is_accounted(env, monkeypatch):
     """저장 단계 실패도 fetch 실패와 동일하게 회계된다(커서 미전진 + degraded)."""
     source, _, fake = env

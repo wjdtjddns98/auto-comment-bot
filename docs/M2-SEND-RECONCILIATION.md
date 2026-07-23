@@ -271,12 +271,34 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       위조 시 업스트림 0회·TTL 경계·2/3단계 RequestError·advisory lock 실동시성(2차 L3).
       ④ Dockerfile 이 --workers 1 을 암묵 보장 — in-memory state 의존 명시 검토(2차 L4).
 
-- [ ] R11. **`_record_failure` 일반 실패의 무조건 `backoff_until=None` 저장**(R9 2차 리뷰
+- [x] R11. **`_record_failure` 일반 실패의 무조건 `backoff_until=None` 저장**(R9 2차 리뷰
       Medium-1 — PR #63 이전부터 존재, 이번 범위 제외): poll↔reconcile 이 같은 루프에서
       interleave 될 때 stale `Source` 객체의 일반 실패 회계가 다른 채널이 방금 건 미래
       backoff 를 덮어쓸 수 있는 TOCTOU(불변식 ④). 성공 경로에 이미 있는 "미래 backoff
       존중" 가드(poll_source 의 재조회)를 실패 경로에도 적용하거나, 조건부 원자 update
       (`backoff_until__lte=now` 류)로 제한. 빈도 낮음(두 채널이 수초 내 교차 실패해야 발생).
+      — **처리(2026-07-23)**: 조건부 원자 update 안 채택 — 일반 실패의 backoff 정리를
+      `filter(id=…, backoff_until__lte=now).update(backoff_until=None)` 로 제한해 만료분만
+      지운다(재조회 가드와 달리 재조회↔저장 사이 경쟁 창 자체가 없음). 회귀 테스트 2건
+      (미래 backoff 보존 — 미수정 코드에서 실패 확인 · 만료 backoff 정리 유지).
+      — **독립 리뷰(codex, 2026-07-23)**: diff 내 Critical/High 없음 — 봉합 확인(수정 전
+      코드에서 회귀 재현까지 검증). Low 1건(assertion 강화) 반영, diff 밖 사전 존재
+      Medium 2건은 R12·R13 으로 분리.
+
+- [ ] R12. **`_record_failure` rate-limit 분기가 기존의 더 긴 backoff 를 비교 없이 덮어씀**
+      (R11 독립 리뷰 M1 — R11 이전부터 존재, 불변식 ④): reconcile 이 `Retry-After=3600`
+      류 긴 backoff 를 건 직후 poll 429 회계가 자기 카운터 기준 짧은 backoff(1회차 60초)
+      로 같은 소스를 덮어써 실제 만료 시각이 단축될 수 있음. reconcile.py 의
+      `refresh_from_db()` 도 값을 max 비교하지 않아 보호 안 됨. 수정안: 후보와 현재 값 중
+      `max()` 저장 또는 단일 조건부 UPDATE(`GREATEST` 류). 빈도 낮음(두 채널 교차 429).
+
+- [ ] R13. **poll 성공 경로의 DB 커넥션 레벨 잔여 TOCTOU**(R11 독립 리뷰 M2 — 기존 재조회
+      가드 코드, 불변식 ④): asyncio 단일 루프라도 커넥션 풀 기본값(maxsize=5, `db.py` 가
+      제한 안 함)으로 같은 프로세스에서 진짜 동시 트랜잭션이 가능 — reconcile 의 UPDATE 가
+      커밋 전(행 잠금)일 때 poll 의 재조회 SELECT(READ COMMITTED)가 이전 값을 읽고, 이후
+      `save()`(WHERE 가 PK 뿐, CAS 없음)가 최신 행을 stale 값으로 덮어쓸 수 있음. 수정안:
+      성공 경로(108-120행)도 R11 과 같은 조건부 원자 update 로 교체, 또는 풀을
+      `minsize=maxsize=1` 로 제한해 단일 워커 전제를 커넥션 레벨까지 정합화(처리량 영향).
 
 ## 참고 문서
 
