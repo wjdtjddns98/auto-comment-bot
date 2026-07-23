@@ -141,11 +141,15 @@ async def _record_failure(
         if retry_after_sec:
             delay = max(delay, min(retry_after_sec, 24 * 3600))
         source.backoff_until = _now() + timedelta(seconds=delay)
+        await source.save(update_fields=["health_status", "backoff_until"])
     else:
-        # 일반 실패에는 backoff 를 걸지 않는다 — 이전 값이 남아 만료된 backoff 가
-        # API 에 계속 노출되지 않게 정리한다.
-        source.backoff_until = None
-    await source.save(update_fields=["health_status", "backoff_until"])
+        # 일반 실패에는 backoff 를 걸지 않는다 — 만료된 backoff 가 API 에 계속 노출되지
+        # 않게 정리하되, 다른 채널(poll↔reconcile interleave)이 fetch 대기 중 방금 건
+        # **미래** backoff 를 이 stale 객체의 무조건 None 저장으로 지우지 않는다(R11
+        # TOCTOU, 불변식 ④). 성공 경로(poll_source)의 재조회 가드와 같은 방향이되,
+        # 만료분만 지우는 조건부 원자 update 라 재조회↔저장 사이 경쟁 창 자체가 없다.
+        await source.save(update_fields=["health_status"])
+        await Source.filter(id=source.id, backoff_until__lte=_now()).update(backoff_until=None)
 
 
 async def _store_matches(source: Source, posts: list) -> int:
