@@ -23,6 +23,11 @@ _BACKOFF_CAP_SEC = 3600
 _DOWN_AFTER_FAILURES = 5
 
 _fail_counts: dict[int, int] = {}
+# 조정(reconcile) 실패 카운터 — poll 과 분리(R9①). 공용이면 수집 성공의 리셋이 조정
+# 지속 실패(429 포함)의 지수 backoff 를 매번 최소치(60초)로 되돌리고(불변식 ④ 약화),
+# _DOWN_AFTER_FAILURES 미도달·down→degraded 역전을 일으킨다. 해제는 reconcile_tick
+# 틱말 집계(조정 성공/대상 소멸)에서만 한다.
+_reconcile_fail_counts: dict[int, int] = {}
 state: dict = {"last_tick": None}  # /health poller heartbeat (FR-17)
 # 조정 전용 실패 상태(어댑터 2차 리뷰 R-2): 조정 조회가 실패 중인 소스는 수집 성공이
 # health 를 ok 로 되돌리지 않는다 — 되돌리면 다음 조정 틱이 다시 degraded 로 낮추며
@@ -49,6 +54,7 @@ def _is_due(source: Source, now: datetime) -> bool:
 def forget_source(source_id: int) -> None:
     """소스 삭제 시 실패 카운터/조정 실패 상태 정리(미세 누수 방지)."""
     _fail_counts.pop(source_id, None)
+    _reconcile_fail_counts.pop(source_id, None)
     _reconcile_failing.discard(source_id)
 
 
@@ -106,7 +112,9 @@ async def poll_source(source: Source) -> int:
         fields.append("backoff_until")
         # 조정 조회가 실패 중이면 health 는 건드리지 않는다(R-2 깜빡임 방지) — 이 객체의
         # health 값 자체가 stale 일 수 있으므로 조건부 대입이 아니라 저장 필드에서 제외한다.
-        if source.id not in _reconcile_failing:
+        # 카운터도 함께 확인한다(R9 2차 리뷰 High-1): 429 조정 실패는 플래그를 세우지
+        # 않으므로 플래그만 보면 backoff 만료 직후 수집 성공이 down 을 ok 로 되돌린다.
+        if source.id not in _reconcile_failing and not _reconcile_fail_counts.get(source.id):
             source.health_status = HealthStatus.ok
             fields.append("health_status")
     await source.save(update_fields=fields)
@@ -114,12 +122,18 @@ async def poll_source(source: Source) -> int:
 
 
 async def _record_failure(
-    source: Source, *, retry_after_sec: float | None, rate_limited: bool
+    source: Source, *, retry_after_sec: float | None, rate_limited: bool,
+    reconcile: bool = False,
 ) -> None:
-    count = _fail_counts.get(source.id, 0) + 1
-    _fail_counts[source.id] = count
+    counts = _reconcile_fail_counts if reconcile else _fail_counts
+    count = counts.get(source.id, 0) + 1
+    counts[source.id] = count
+    # health 는 두 카운터의 최대 기준 — 한쪽 경로의 낮은 카운트 회계가 다른 쪽이 이미
+    # 도달한 down 을 degraded 로 되돌리지 않는다(R9① 역전 방지).
+    other = _fail_counts if reconcile else _reconcile_fail_counts
+    effective = max(count, other.get(source.id, 0))
     source.health_status = (
-        HealthStatus.down if count >= _DOWN_AFTER_FAILURES else HealthStatus.degraded
+        HealthStatus.down if effective >= _DOWN_AFTER_FAILURES else HealthStatus.degraded
     )
     if rate_limited:
         # 429/403 지수 backoff (FR-4). 서버의 Retry-After 가 더 길면 그쪽을 존중.

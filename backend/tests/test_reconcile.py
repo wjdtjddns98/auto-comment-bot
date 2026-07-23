@@ -348,6 +348,148 @@ async def test_reconcile_fetch_failure_flags_immediately(verify_pending_match, m
 
 
 @pytest.mark.db
+async def test_poll_success_does_not_reset_reconcile_backoff(verify_pending_match, monkeypatch):
+    """R9① 회귀: 조정 지속 429 사이에 수집 성공이 끼어도 조정 실패 카운터는 리셋되지
+    않는다 — 지수 backoff 가 매번 최소치(60초)로 되돌아가던 동작 봉합(불변식 ④)."""
+    from app import poller
+    from app import sources as sources_registry
+    from app.sources import RateLimitedError
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    adapter = FakeVerifyAdapter(error=RateLimitedError("throttle"))
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_post(match)  # 429 1회차 — 60초대 backoff
+    assert poller._reconcile_fail_counts[match.source_id] == 1
+
+    # 시간 경과 시뮬레이션 후 수집 성공이 끼어드는 상황
+    await Source.filter(id=match.source_id).update(backoff_until=None)
+
+    class PollOk:
+        can_write = False
+
+        async def fetch(self, source, since):
+            return []
+
+    monkeypatch.setattr(poller, "get_adapter", lambda _t: PollOk())
+    source = await Source.get(id=match.source_id)
+    await poller.poll_source(source)
+    assert poller._reconcile_fail_counts[match.source_id] == 1  # 수집 성공이 못 지운다
+
+    await match.fetch_related("source")
+    await reconcile.reconcile_post(match)  # 429 2회차 — 60*2^1 지수 증가 확인
+    fresh = await Source.get(id=match.source_id)
+    assert fresh.backoff_until - datetime.now(UTC) >= timedelta(seconds=110)
+
+
+@pytest.mark.db
+async def test_reconcile_settle_failure_still_clears_flag(verify_pending_match, monkeypatch):
+    """R9② 회귀: 종결 회계(_settle_sent)가 sent 증거 없는 IntegrityError 로 실패해도
+    조회 성공은 fetch_ok 로 집계된다 — 기존 _reconcile_failing 플래그가 이번 틱에 해제
+    (이력 의존 지연 제거)되고, 행은 롤백으로 verify_pending 유지(전송 안전성 불변)."""
+    from app import poller
+    from app import sources as sources_registry
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", {match.source_id})
+    # 존재하지 않는 reviewer FK → _settle_sent 의 ReplyActionLog.create 가 IntegrityError
+    # (sent 증거 없음 → 재raise 경로)
+    meta = dict(match.verify_meta)
+    meta["reviewer_id"] = 999_999_999
+    await MatchedPost.filter(id=match.id).update(verify_meta=meta)
+    adapter = FakeVerifyAdapter(replies=[_reply(body)])
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_tick()
+
+    assert match.source_id not in poller._reconcile_failing  # fetch_ok 집계로 해제
+    await match.refresh_from_db()
+    assert match.status == PostStatus.verify_pending  # 다음 주기 재시도
+    assert await ReplyActionLog.filter(matched_post_id=match.id).count() == 0
+
+
+@pytest.mark.db
+async def test_reconcile_tick_mixed_outcome_keeps_rate_limit_counter(
+    verify_pending_match, monkeypatch
+):
+    """R9① 2차 회귀(High-2): 같은 틱에서 한 행 성공 + 다른 행 429 인 소스는 틱말 집계가
+    방금 증가한 조정 실패 카운터를 지우지 않는다 — 지수 backoff 유지(불변식 ④)."""
+    from app import poller
+    from app import sources as sources_registry
+    from app.sources import RateLimitedError
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", set())
+    # 두 번째 verify_pending 행 — 이 행만 429 (id 순 처리라 성공 행이 먼저 집계된다)
+    row2 = await MatchedPost.create(
+        source=await Source.get(id=match.source_id),
+        external_post_id="target-media-2", content="본문2",
+        status=PostStatus.verify_pending,
+        verify_meta={
+            "target_media_id": "target-media-2", "claim_ts": CLAIM.isoformat(),
+            "attempts": 0, "reviewer_id": user.id, "final_body": body,
+            "sns_account_id": account.id,
+        },
+    )
+
+    class MixedAdapter(FakeVerifyAdapter):
+        async def fetch_replies(self, source, target_media_id, account, since):
+            self.fetch_calls += 1
+            if target_media_id == "target-media-2":
+                raise RateLimitedError("throttle")
+            return self.replies
+
+    adapter = MixedAdapter(replies=[_reply(body)])
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_tick()
+    await row2.delete()  # 정리 먼저 — assert 실패 시에도 픽스처 teardown 이 FK 로 막히지 않게
+
+    # 429 카운터는 같은 틱의 성공 행 집계가 지우지 못한다
+    assert poller._reconcile_fail_counts.get(match.source_id) == 1
+    source = await Source.get(id=match.source_id)
+    assert source.backoff_until is not None  # 공유 backoff 회계는 정상
+    await match.refresh_from_db()
+    assert match.status == PostStatus.replied  # 성공 행은 정상 종결
+
+
+@pytest.mark.db
+async def test_reconcile_missed_settle_failure_still_counts_fetch_ok(
+    verify_pending_match, monkeypatch
+):
+    """R9② 2차 회귀(High-3): 미게시 판정 회계가 IntegrityError(reviewer FK 등)로 실패해도
+    조회 성공은 fetch_ok 로 집계 — 기존 플래그가 이번 틱에 해제되고 행은 verify_pending
+    유지(롤백 — 다음 주기 재시도, 전송 안전성 불변). _settle_sent 분기와 대칭."""
+    from app import poller
+    from app import sources as sources_registry
+
+    match, user, account, body = verify_pending_match
+    monkeypatch.setattr(poller, "_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+    monkeypatch.setattr(poller, "_reconcile_failing", {match.source_id})
+    monkeypatch.setattr(settings, "reconcile_max_attempts", 1)
+    meta = dict(match.verify_meta)
+    meta["reviewer_id"] = 999_999_999  # 존재하지 않는 FK → 미게시 판정 회계가 실패
+    await MatchedPost.filter(id=match.id).update(verify_meta=meta)
+    adapter = FakeVerifyAdapter(replies=[_reply("판정에 안 걸리는 무관한 답글")])
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+
+    await reconcile.reconcile_tick()
+
+    assert match.source_id not in poller._reconcile_failing  # fetch_ok 집계로 해제
+    await match.refresh_from_db()
+    assert match.status == PostStatus.verify_pending  # 롤백 — 다음 주기 재시도
+    assert await ReplyActionLog.filter(matched_post_id=match.id).count() == 0
+
+
+@pytest.mark.db
 async def test_reviewer_delete_blocked_by_audit_restrict(verify_pending_match):
     """감사 이력이 있는 reviewer 는 하드삭제가 DB 에서 거부된다(RESTRICT — R-5 방어 확인).
     사용자 삭제 기능 도입 시 전제조건은 models.ReplyActionLog.reviewer 주석 참조."""
