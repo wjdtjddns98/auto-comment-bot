@@ -7,6 +7,20 @@ import { cn } from "../lib/cn";
 import { Badge, type BadgeTone } from "./ui/Badge";
 import { Button } from "./ui/Button";
 
+function LogoMark() {
+  // 레이더 모니터 — 동심원 + 스윕 + 블립(키워드 탐지). 색은 디자인 토큰 brand-600.
+  return (
+    <svg viewBox="0 0 32 32" fill="none" className="h-7 w-7 shrink-0 text-brand-600" aria-hidden="true">
+      <circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" strokeWidth="1.6" opacity="0.3" />
+      <circle cx="16" cy="16" r="8" fill="none" stroke="currentColor" strokeWidth="1.6" opacity="0.55" />
+      <path d="M16 16 L28 12 A12.5 12.5 0 0 1 27 22 Z" fill="currentColor" opacity="0.13" />
+      <line x1="16" y1="16" x2="28" y2="12" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <circle cx="16" cy="16" r="2" fill="currentColor" />
+      <circle cx="22.5" cy="9.5" r="2.4" fill="currentColor" />
+    </svg>
+  );
+}
+
 function MenuIcon({ open }: { open: boolean }) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5" aria-hidden="true">
@@ -69,7 +83,11 @@ export function Layout() {
     <div className="min-h-screen">
       <header className="border-b border-gray-200 bg-white">
         <div className="flex items-center gap-x-4 px-4 py-3 sm:px-6">
-          <Link to="/" className="whitespace-nowrap font-bold text-gray-900 hover:text-brand-600">
+          <Link
+            to="/"
+            className="flex items-center gap-2 whitespace-nowrap font-bold text-gray-900 hover:text-brand-600"
+          >
+            <LogoMark />
             SNS 키워드 모니터
           </Link>
           {/* 데스크톱(sm↑) 인라인 내비 */}
