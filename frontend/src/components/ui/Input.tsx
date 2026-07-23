@@ -31,7 +31,8 @@ interface FieldProps {
 
 export function Field({ label, htmlFor, children }: FieldProps) {
   return (
-    <label htmlFor={htmlFor} className="flex flex-col gap-1 text-sm text-gray-700">
+    // 모바일에서는 풀폭으로 세로 스택(부모 flex-wrap 행에서 한 줄 차지), sm↑에서는 콘텐츠 폭.
+    <label htmlFor={htmlFor} className="flex w-full flex-col gap-1 text-sm text-gray-700 sm:w-auto">
       <span className="font-medium">{label}</span>
       {children}
     </label>
