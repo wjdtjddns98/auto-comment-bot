@@ -41,11 +41,14 @@ function SourceHealthBar() {
   const { data: sources, isLoading } = useQuery({ queryKey: ["sources"], queryFn: getSources });
 
   if (isLoading) return <p className="text-sm text-gray-500">소스 상태 확인 중…</p>;
-  if (!sources || sources.length === 0) return null;
+
+  // 상단 상태 바에는 활성 소스만 노출(비활성 소스는 표시하지 않음).
+  const activeSources = (sources ?? []).filter((source) => source.enabled);
+  if (activeSources.length === 0) return null;
 
   return (
     <div className="flex flex-wrap gap-3">
-      {sources.map((source) => (
+      {activeSources.map((source) => (
         // 모바일: 풀폭 카드 + 내용 줄바꿈(가로 오버플로 방지), sm↑: 콘텐츠 폭.
         <Card
           key={source.id}
@@ -55,7 +58,6 @@ function SourceHealthBar() {
           <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>
             ● {source.health_status}
           </Badge>
-          {!source.enabled && <Badge tone="neutral">비활성</Badge>}
           <span className="text-xs text-gray-500">
             최근 수집 {formatDateTime(source.last_success_at)}
           </span>
@@ -132,11 +134,13 @@ export default function DashboardPage() {
           <span className="font-medium">소스</span>
           <Select value={sourceId} onChange={(e) => updateSource(e.target.value)}>
             <option value="all">전체</option>
-            {(sources ?? []).map((s) => (
-              <option key={s.id} value={s.id}>
-                {getSourceDisplayName(s)}
-              </option>
-            ))}
+            {(sources ?? [])
+              .filter((s) => s.enabled)
+              .map((s) => (
+                <option key={s.id} value={s.id}>
+                  {getSourceDisplayName(s)}
+                </option>
+              ))}
           </Select>
         </label>
         <span className="ml-auto text-sm text-gray-500">총 {matchesQuery.data?.total ?? 0}건</span>
