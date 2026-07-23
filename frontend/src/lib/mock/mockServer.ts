@@ -437,15 +437,29 @@ const threadsOAuthUsernames = new Map<number, string>();
 
 function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
   requireUser();
-  return { url: "https://www.threads.net/oauth/authorize?mock=1&client_id=mock&redirect_uri=mock" };
+  // 실서버처럼 state 를 URL 에 실어 형태를 맞춘다(값 검증은 아래 connect 에서).
+  const params = new URLSearchParams({
+    client_id: "mock",
+    redirect_uri: "https://nutti.co.kr/threads-callback.html",
+    scope: "threads_basic",
+    response_type: "code",
+    state: `mock-state-${Date.now()}`,
+  });
+  return { url: `https://www.threads.net/oauth/authorize?${params.toString()}` };
 }
 
-// 코드 "invalid" 로 만료/무효 코드 400 흐름을 재현해볼 수 있다(다른 목서버 매직 값들과 동일 관례).
+// 실서버 계약(state 필수)을 모의해 FE 가 state 를 빠뜨리는 드리프트를 mock QA 에서 잡는다.
+// 매직 값: code "invalid" → 400 코드 무효, state "expired" → 400 세션 만료.
 function handleThreadsOAuthConnect(body: unknown): SnsAccount {
   const user = requireUser();
-  const req = (body ?? {}) as { code?: string; display_name?: string };
+  const req = (body ?? {}) as { code?: string; state?: string; display_name?: string };
   const code = (req.code ?? "").trim();
+  const state = (req.state ?? "").trim();
   if (!code) throw new MockApiError(422, "code: 인증 코드가 필요합니다");
+  if (!state) throw new MockApiError(422, "state: 연동 값(state)이 필요합니다");
+  if (state === "expired") {
+    throw new MockApiError(400, "연동 세션이 만료되었거나 유효하지 않습니다 — 다시 연동해 주세요");
+  }
   if (code === "invalid") {
     throw new MockApiError(400, "인증 코드가 유효하지 않거나 만료되었습니다 — 다시 연동해 주세요");
   }

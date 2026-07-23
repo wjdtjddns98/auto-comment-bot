@@ -117,6 +117,9 @@ export interface ThreadsOAuthAuthorizeUrlResponse {
 
 export interface ThreadsOAuthConnectRequest {
   code: string;
+  // authorize-url 발급분과 일치해야 하는 1회용 state — 콜백 페이지가 code 와 함께
+  // 되돌려준다(docs/API-SPEC.md §threads-oauth). 누락 시 서버 422/400.
+  state: string;
   display_name?: string;
 }
 
