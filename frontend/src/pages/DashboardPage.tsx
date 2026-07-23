@@ -46,7 +46,11 @@ function SourceHealthBar() {
   return (
     <div className="flex flex-wrap gap-3">
       {sources.map((source) => (
-        <Card key={source.id} className="flex items-center gap-3 px-4 py-2.5">
+        // 모바일: 풀폭 카드 + 내용 줄바꿈(가로 오버플로 방지), sm↑: 콘텐츠 폭.
+        <Card
+          key={source.id}
+          className="flex w-full flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2.5 sm:w-auto"
+        >
           <span className="font-medium text-gray-900">{getSourceDisplayName(source)}</span>
           <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>
             ● {source.health_status}
@@ -114,7 +118,7 @@ export default function DashboardPage() {
       <SourceHealthBar />
 
       <Card className="flex flex-wrap items-end gap-4">
-        <label className="flex flex-col gap-1 text-sm text-gray-700">
+        <label className="flex w-full flex-col gap-1 text-sm text-gray-700 sm:w-auto">
           <span className="font-medium">상태</span>
           <Select value={status} onChange={(e) => updateStatus(e.target.value)}>
             {STATUS_OPTIONS.map((opt) => (
@@ -124,7 +128,7 @@ export default function DashboardPage() {
             ))}
           </Select>
         </label>
-        <label className="flex flex-col gap-1 text-sm text-gray-700">
+        <label className="flex w-full flex-col gap-1 text-sm text-gray-700 sm:w-auto">
           <span className="font-medium">소스</span>
           <Select value={sourceId} onChange={(e) => updateSource(e.target.value)}>
             <option value="all">전체</option>
