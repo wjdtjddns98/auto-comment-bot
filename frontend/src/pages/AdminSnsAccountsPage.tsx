@@ -20,17 +20,34 @@ import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 
 const PLATFORMS: SnsPlatform[] = ["threads", "naver_cafe", "community"];
 
+// 콜백 페이지가 표시하는 연동 값(`code=...&state=...`) 또는 전체 콜백 URL 붙여넣기를
+// code/state 로 분리한다(docs/API-SPEC.md §threads-oauth — state 는 서버 검증 필수).
+// `?` 뒤를 쿼리로 보므로 전체 URL·순수 페이로드 모두 수용한다.
+function parseThreadsOAuthInput(raw: string): { code: string; state: string } | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const query = trimmed.includes("?") ? trimmed.slice(trimmed.indexOf("?") + 1) : trimmed;
+  const params = new URLSearchParams(query);
+  const code = params.get("code")?.trim() ?? "";
+  const state = params.get("state")?.trim() ?? "";
+  if (code && state) return { code, state };
+  return null;
+}
+
 function ThreadsOAuthConnectForm() {
   const queryClient = useQueryClient();
   const [code, setCode] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // 팝업이 차단돼 window.open 이 실패하면 수동으로 열 수 있게 URL 을 노출한다.
+  const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
 
   const authorizeMutation = useMutation({
     mutationFn: getThreadsOAuthAuthorizeUrl,
     onSuccess: ({ url }) => {
       setError(null);
-      window.open(url, "_blank", "noopener,noreferrer");
+      const opened = window.open(url, "_blank", "noopener,noreferrer");
+      setAuthorizeUrl(opened ? null : url);
     },
     onError: (err) => setError(describeApiError(err)),
   });
@@ -47,12 +64,14 @@ function ThreadsOAuthConnectForm() {
   });
 
   function handleConnect() {
-    if (!code.trim()) {
-      setError("연동 코드를 입력하세요.");
+    const parsed = parseThreadsOAuthInput(code);
+    if (!parsed) {
+      setError("콜백 페이지의 연동 값(code=...&state=...) 또는 전체 URL을 붙여넣으세요.");
       return;
     }
     connectMutation.mutate({
-      code: code.trim(),
+      code: parsed.code,
+      state: parsed.state,
       display_name: displayName.trim() || undefined,
     });
   }
@@ -62,8 +81,8 @@ function ThreadsOAuthConnectForm() {
       <div>
         <h2 className="text-sm font-semibold text-gray-900">Threads 동의 화면으로 연동</h2>
         <p className="text-xs text-gray-500">
-          동의 화면을 새 창으로 열어 승인하면 콜백 페이지에 인증 코드가 표시됩니다. 그 코드를
-          아래에 붙여넣으세요. 코드는 일회용이며 곧 만료됩니다.
+          동의 화면을 새 창으로 열어 승인하면 콜백 페이지에 연동 값이 표시됩니다. 그 값을 통째로
+          복사해 아래에 붙여넣으세요. 값은 일회용이며 곧 만료됩니다.
         </p>
       </div>
       <Button
@@ -74,12 +93,21 @@ function ThreadsOAuthConnectForm() {
       >
         {authorizeMutation.isPending ? "여는 중…" : "Threads로 연결"}
       </Button>
+      {authorizeUrl && (
+        <p className="text-xs text-gray-500">
+          팝업이 차단된 것 같습니다.{" "}
+          <a href={authorizeUrl} target="_blank" rel="noopener noreferrer" className="underline">
+            여기를 눌러 동의 화면 열기
+          </a>
+          .
+        </p>
+      )}
       <div className="flex flex-wrap gap-4">
-        <Field label="인증 코드">
+        <Field label="연동 값">
           <Input
             value={code}
             onChange={(e) => setCode(e.target.value)}
-            placeholder="콜백 페이지에서 복사한 코드"
+            placeholder="콜백 페이지의 code=...&state=... 또는 전체 URL"
           />
         </Field>
         <Field label="표시 이름 (선택)">

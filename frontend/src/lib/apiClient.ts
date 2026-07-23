@@ -47,6 +47,24 @@ export class ApiError extends Error {
 
 const MUTATING_METHODS = new Set(["POST", "PATCH", "DELETE", "PUT"]);
 
+// FastAPI 검증 오류(422)의 detail 은 문자열이 아니라 [{ loc, msg, type }] 배열이다.
+// 이걸 그대로 ApiError.detail 에 넣으면 UI 의 <p>{detail}</p> 렌더에서 React 가
+// 크래시한다(객체/배열은 자식으로 렌더 불가 → 페이지 백지). 항상 문자열로 정규화한다.
+function normalizeErrorDetail(detail: unknown): string | undefined {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const msgs = detail
+      .map((item) =>
+        item && typeof item === "object" && "msg" in item
+          ? String((item as { msg: unknown }).msg)
+          : null
+      )
+      .filter((msg): msg is string => Boolean(msg));
+    if (msgs.length) return msgs.join(", ");
+  }
+  return undefined;
+}
+
 // CSRF 토큰은 메모리에 캐시하고, 만료(403) 시 1회 재발급 후 재시도한다(docs/API-SPEC.md 공통).
 let csrfToken: string | null = null;
 let csrfPromise: Promise<string> | null = null;
@@ -134,8 +152,9 @@ async function request<T>(
     let detail = res.statusText;
     let action: string | undefined;
     try {
-      const errBody = (await res.json()) as { detail?: string; action?: string };
-      if (errBody.detail) detail = errBody.detail;
+      const errBody = (await res.json()) as { detail?: unknown; action?: string };
+      const normalized = normalizeErrorDetail(errBody.detail);
+      if (normalized) detail = normalized;
       action = errBody.action;
     } catch {
       // 응답 본문이 JSON이 아니면 statusText 유지
