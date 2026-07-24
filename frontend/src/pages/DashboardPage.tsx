@@ -14,6 +14,7 @@ import {
   HEALTH_TONE,
   STATUS_LABEL,
   STATUS_TONE,
+  toPlainText,
 } from "../lib/matchDisplay";
 
 const PAGE_SIZE = 20;
@@ -177,6 +178,8 @@ export default function DashboardPage() {
                 const source = sourceMap.get(m.source_id);
                 const keyword =
                   m.matched_keyword_id != null ? keywordMap.get(m.matched_keyword_id) : undefined;
+                // RSS 본문은 피드 원문 HTML 이라 평문으로 정규화해 표시한다(목록·툴팁 동일).
+                const content = toPlainText(m.content);
                 return (
                   <Tr
                     key={m.id}
@@ -188,8 +191,8 @@ export default function DashboardPage() {
                     </Td>
                     <Td>{source ? getSourceDisplayName(source) : `#${m.source_id}`}</Td>
                     <Td>{keyword?.pattern ?? "-"}</Td>
-                    <Td className="max-w-sm truncate" title={m.content}>
-                      {m.content}
+                    <Td className="max-w-sm truncate" title={content}>
+                      {content}
                     </Td>
                     <Td>{m.author ?? "-"}</Td>
                     <Td className="whitespace-nowrap">{formatDateTime(m.matched_at)}</Td>

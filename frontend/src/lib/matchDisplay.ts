@@ -92,6 +92,31 @@ export const REPLY_ACTION_TONE: Record<ReplyActionType, BadgeTone> = {
   unknown: "warning",
 };
 
+// 마크업(태그)이나 엔티티가 섞여 있는지 — 순수 텍스트 본문(Threads 등)은 건드리지 않기 위한 가드.
+const HTML_LIKE = /<[a-z!/][^>]*>|&(?:[a-z]+|#\d+|#x[0-9a-f]+);/i;
+
+/**
+ * 게시물 본문을 표시용 평문으로 정규화한다.
+ *
+ * RSS(community) 소스의 `content` 는 피드 description 원문이라 `<a href="...">`·`<font>`·`&nbsp;`
+ * 가 그대로 들어온다. React 가 이스케이프하므로 XSS 는 없지만 목록·상세에 마크업이 그대로 찍히고
+ * href 의 긴 URL 이 카드를 가로로 밀어낸다(2026-07-24 실서버 QA).
+ *
+ * DOMParser 로 파싱한 문서는 비활성(inert) 이라 스크립트 실행·리소스 로드가 없고, 여기서는
+ * textContent 만 꺼내 쓴다 — innerHTML 로 되돌리지 말 것.
+ */
+export function toPlainText(content: string): string {
+  if (!HTML_LIKE.test(content)) return content;
+  // 블록 경계는 줄바꿈으로 살린다 — textContent 는 태그를 지우며 줄바꿈도 함께 잃는다.
+  const withBreaks = content.replace(/<br\s*\/?>|<\/(?:p|div|li)>/gi, "\n");
+  const text = new DOMParser().parseFromString(withBreaks, "text/html").body.textContent ?? "";
+  return text
+    .replace(/ /g, " ") // &nbsp; → 일반 공백
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 export function formatDateTime(iso: string | null): string {
   if (!iso) return "-";
   return new Date(iso).toLocaleString("ko-KR", {
