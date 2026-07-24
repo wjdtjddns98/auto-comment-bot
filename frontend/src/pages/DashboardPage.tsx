@@ -189,7 +189,18 @@ export default function DashboardPage() {
                     <Td>
                       <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
                     </Td>
-                    <Td>{source ? getSourceDisplayName(source) : `#${m.source_id}`}</Td>
+                    <Td>
+                      {source ? (
+                        <span className="inline-flex flex-wrap items-center gap-1.5">
+                          {getSourceDisplayName(source)}
+                          {/* 비활성 소스는 상태 바·필터 선택지에서 빠지지만(#70) 이미 수집된 매칭은
+                              목록에 남는다 — 필터에 없는 소스가 뜨는 이유를 배지로 설명한다. */}
+                          {!source.enabled && <Badge tone="neutral">비활성</Badge>}
+                        </span>
+                      ) : (
+                        `#${m.source_id}`
+                      )}
+                    </Td>
                     <Td>{keyword?.pattern ?? "-"}</Td>
                     <Td className="max-w-sm truncate" title={content}>
                       {content}
