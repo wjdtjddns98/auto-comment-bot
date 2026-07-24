@@ -100,24 +100,28 @@ async def poll_source(source: Source) -> int:
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
     _fail_counts.pop(source.id, None)
     source.last_success_at = source.last_polled_at
-    fields = ["last_success_at"]
-    # fetch 대기 중 조정(reconcile) 틱이 같은 소스에 걸었을 수 있는 **최신** backoff 를
-    # 이 stale 객체의 backoff_until=None 저장으로 지우지 않는다(PR #43 검증 리뷰
-    # High-2 — 2차 리뷰 R-1 의 역방향). 미래 backoff 가 새로 걸려 있으면 그 회계
-    # (429 degraded)를 존중해 backoff/health 둘 다 건드리지 않는다.
-    row = await Source.filter(id=source.id).values_list("backoff_until", flat=True)
-    backoff_active = bool(row) and row[0] is not None and row[0] > _now()
-    if not backoff_active:
+    await source.save(update_fields=["last_success_at"])
+    # 만료된 backoff 만 원자적으로 정리한다(R13, 불변식 ④). 기존엔 재조회로 backoff 활성
+    # 여부를 본 뒤 stale 객체를 save 했는데, 재조회↔save 사이에 조정(reconcile) 틱이 커밋한
+    # **미래** backoff 를 backoff_until=None 저장으로 덮어쓸 수 있었다(커넥션 풀 maxsize>1
+    # 이라 단일 asyncio 루프에서도 poll↔reconcile 이 진짜 동시 트랜잭션·READ COMMITTED).
+    # 조건부 원자 update 는 그 경쟁 창을 없앤다 — 만료분만 지우므로 방금 걸린 미래 backoff
+    # 는 보존된다(PR #43 검증 리뷰 High-2 보호 그대로, R11 일반 실패 경로와 같은 방향).
+    now = _now()
+    cleared = await Source.filter(id=source.id, backoff_until__lte=now).update(backoff_until=None)
+    if cleared:
         source.backoff_until = None
-        fields.append("backoff_until")
-        # 조정 조회가 실패 중이면 health 는 건드리지 않는다(R-2 깜빡임 방지) — 이 객체의
-        # health 값 자체가 stale 일 수 있으므로 조건부 대입이 아니라 저장 필드에서 제외한다.
-        # 카운터도 함께 확인한다(R9 2차 리뷰 High-1): 429 조정 실패는 플래그를 세우지
-        # 않으므로 플래그만 보면 backoff 만료 직후 수집 성공이 down 을 ok 로 되돌린다.
-        if source.id not in _reconcile_failing and not _reconcile_fail_counts.get(source.id):
+    # health 회복(ok)은 활성 backoff 가 없을 때만 — backoff 활성 여부를 DB 레벨에서 원자적으로
+    # 재확인해 방금 걸린 429(degraded)를 ok 로 되돌리지 않는다(위와 같은 창을 닫음). 조정
+    # 조회가 실패 중인 소스도 건드리지 않는다(R-2 깜빡임 방지) + 카운터도 확인한다(R9 2차
+    # 리뷰 High-1): 429 조정 실패는 플래그를 세우지 않으므로 플래그만 보면 backoff 만료 직후
+    # 수집 성공이 down 을 ok 로 되돌린다.
+    if source.id not in _reconcile_failing and not _reconcile_fail_counts.get(source.id):
+        ok_set = await Source.filter(id=source.id, backoff_until__isnull=True).update(
+            health_status=HealthStatus.ok
+        )
+        if ok_set:
             source.health_status = HealthStatus.ok
-            fields.append("health_status")
-    await source.save(update_fields=fields)
     return stored
 
 
@@ -140,8 +144,22 @@ async def _record_failure(
         delay = min(_BACKOFF_BASE_SEC * 2 ** (count - 1), _BACKOFF_CAP_SEC)
         if retry_after_sec:
             delay = max(delay, min(retry_after_sec, 24 * 3600))
-        source.backoff_until = _now() + timedelta(seconds=delay)
-        await source.save(update_fields=["health_status", "backoff_until"])
+        candidate = _now() + timedelta(seconds=delay)
+        # 다른 채널(poll↔reconcile)이 이미 건 더 긴 backoff 를 이 채널의 짧은 후보(자기
+        # 카운터 기준 지수값)로 단축하지 않는다(R12, 불변식 ④). 무조건 덮어쓰면 reconcile
+        # 이 Retry-After=3600 로 건 직후 poll 429(1회차 60초)가 만료 시각을 앞당길 수 있다.
+        # 후보가 현재값보다 클 때만 원자적으로 덮어써 GREATEST 를 단일 UPDATE 로 보장한다
+        # (재조회→비교 창 없음) — 덮어쓴 경우에만 in-memory 를 맞춘다.
+        # backoff 를 health 보다 **먼저** 커밋한다(R13 성공 경로와 대칭 — 독립 리뷰 M1):
+        # 순서를 반대로 두면 두 UPDATE 사이에 health 만 degraded/down 이고 backoff_until 은
+        # 아직 NULL 인 창이 생겨, 그 순간 poll_tick 스냅샷이 _is_due 를 통과해 방금 429 를
+        # 맞은 소스에 추가 fetch 를 할 수 있다(불변식 ④ 미시 위반).
+        overwrote = await Source.filter(id=source.id).filter(
+            Q(backoff_until__isnull=True) | Q(backoff_until__lt=candidate)
+        ).update(backoff_until=candidate)
+        if overwrote:
+            source.backoff_until = candidate
+        await source.save(update_fields=["health_status"])
     else:
         # 일반 실패에는 backoff 를 걸지 않는다 — 만료된 backoff 가 API 에 계속 노출되지
         # 않게 정리하되, 다른 채널(poll↔reconcile interleave)이 fetch 대기 중 방금 건
