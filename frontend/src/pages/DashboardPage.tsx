@@ -38,6 +38,18 @@ const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }>
   { value: "ignored", label: "무시됨" },
 ];
 
+// 백엔드는 만료된 backoff 를 "해당 소스의 다음 poll 틱"에서 정리하므로(app/poller.py), 만료 시각
+// ~ 다음 틱 사이에는 API 가 이미 지난 backoff_until 을 그대로 내려준다. 그 값을 그대로 빨간
+// 문구로 띄우면 이미 풀린 제한을 소스 주기(poll_interval_sec)만큼 계속 경고하는 셈이라, 미래
+// 시각일 때만 표시한다. 클라이언트 시계 기준 비교라 초 단위 오차는 있으나 분 단위로 틀린
+// 값을 노출하는 것보다 정확하다.
+function isBackoffActive(backoffUntil: string | null): boolean {
+  if (!backoffUntil) return false;
+  const until = new Date(backoffUntil).getTime();
+  // 파싱 실패(NaN)면 값 자체를 신뢰할 수 없으므로 표시하지 않는다.
+  return Number.isFinite(until) && until > Date.now();
+}
+
 function SourceHealthBar() {
   const { data: sources, isLoading } = useQuery({ queryKey: ["sources"], queryFn: getSources });
 
@@ -62,7 +74,7 @@ function SourceHealthBar() {
           <span className="text-xs text-gray-500">
             최근 수집 {formatDateTime(source.last_success_at)}
           </span>
-          {source.backoff_until && (
+          {isBackoffActive(source.backoff_until) && (
             <span className="text-xs text-tone-danger">
               backoff ~{formatDateTime(source.backoff_until)}
             </span>

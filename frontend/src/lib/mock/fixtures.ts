@@ -55,8 +55,10 @@ export const MOCK_SOURCES: Source[] = [
     last_success_at: "2026-07-19T08:30:00Z",
     // M2 수용기준 재현: 429 주입 → health_status='degraded' + backoff_until 동시 반영
     // (backend/app/poller.py _record_failure — rate_limited=True 경로).
+    // 대시보드는 **활성** backoff 만 표시하므로 고정 시각을 쓰면 그 시각이 지난 뒤 이 픽스처가
+    // 조용히 무의미해진다. 항상 미래가 되도록 로드 시각 기준 상대값으로 둔다.
     health_status: "degraded",
-    backoff_until: "2026-07-22T15:30:00Z",
+    backoff_until: new Date(Date.now() + 30 * 60_000).toISOString(),
   },
   {
     id: 3,
@@ -67,6 +69,20 @@ export const MOCK_SOURCES: Source[] = [
     enabled: false,
     last_success_at: null,
     health_status: "down",
+    backoff_until: "2026-07-20T12:00:00Z",
+  },
+  {
+    id: 4,
+    name: "만료 backoff 대기 소스",
+    type: "community",
+    config: { rss_url: "https://example-dogfood.com/feed.rss" },
+    poll_interval_sec: 900,
+    enabled: true,
+    last_success_at: "2026-07-19T07:00:00Z",
+    // backoff 는 만료됐지만 아직 다음 poll 틱이 오지 않아 API 가 과거 시각을 그대로 내려주는
+    // 상태(백엔드는 만료분을 다음 틱에서 정리한다 — app/poller.py). 대시보드에 backoff 문구가
+    // **뜨지 않아야** 정상이다.
+    health_status: "degraded",
     backoff_until: "2026-07-20T12:00:00Z",
   },
 ];
