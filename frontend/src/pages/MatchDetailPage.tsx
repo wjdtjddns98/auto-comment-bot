@@ -26,6 +26,7 @@ import {
   STATUS_LABEL,
   STATUS_TONE,
   THREADS_BODY_LIMIT,
+  toPlainText,
 } from "../lib/matchDisplay";
 
 function describeError(error: unknown): string {
@@ -187,7 +188,8 @@ export default function MatchDetailPage() {
           <span>게시일시: {formatDateTime(match.published_at)}</span>
           <span>매칭일시: {formatDateTime(match.matched_at)}</span>
         </div>
-        <p className="whitespace-pre-wrap text-gray-900">{match.content}</p>
+        {/* RSS 본문은 피드 원문 HTML — 평문 정규화 + break-words 로 긴 URL 이 카드를 밀지 않게 한다. */}
+        <p className="whitespace-pre-wrap break-words text-gray-900">{toPlainText(match.content)}</p>
         {match.url ? (
           <a href={match.url} target="_blank" rel="noreferrer" className="text-sm text-brand-600 hover:underline">
             원문 보기 ↗
