@@ -285,20 +285,44 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       코드에서 회귀 재현까지 검증). Low 1건(assertion 강화) 반영, diff 밖 사전 존재
       Medium 2건은 R12·R13 으로 분리.
 
-- [ ] R12. **`_record_failure` rate-limit 분기가 기존의 더 긴 backoff 를 비교 없이 덮어씀**
+- [x] R12. **`_record_failure` rate-limit 분기가 기존의 더 긴 backoff 를 비교 없이 덮어씀**
       (R11 독립 리뷰 M1 — R11 이전부터 존재, 불변식 ④): reconcile 이 `Retry-After=3600`
       류 긴 backoff 를 건 직후 poll 429 회계가 자기 카운터 기준 짧은 backoff(1회차 60초)
       로 같은 소스를 덮어써 실제 만료 시각이 단축될 수 있음. reconcile.py 의
       `refresh_from_db()` 도 값을 max 비교하지 않아 보호 안 됨. 수정안: 후보와 현재 값 중
       `max()` 저장 또는 단일 조건부 UPDATE(`GREATEST` 류). 빈도 낮음(두 채널 교차 429).
+      — **처리(2026-07-24)**: 조건부 원자 UPDATE 채택 — `filter(id).filter(Q(backoff_until
+      __isnull=True) | Q(backoff_until__lt=candidate)).update(backoff_until=candidate)` 로
+      후보가 현재값보다 클 때만 덮어써 GREATEST 를 단일 문으로 보장(재조회→비교 창 없음).
+      회귀 테스트 2건(더 긴 기존 backoff 단축 방지 — 미수정 코드에서 실패 재현 · 정당한 연장 보존).
+      — **독립 리뷰(codex, 2026-07-24) Medium 1건 반영**: health 단독 save 를 backoff 원자
+      UPDATE **뒤**로 두면 두 UPDATE 사이 "health=degraded·backoff=NULL" 창에 poll_tick
+      스냅샷이 `_is_due` 를 통과해 방금 429 맞은 소스에 추가 fetch 를 할 수 있음(④ 미시 위반).
+      순서를 backoff-먼저로 반전(R13 성공 경로와 대칭) + 회귀 테스트 1건(health save 시점에
+      backoff 선커밋 확인). Critical/High 0건, 불변식 ①②③ 범위 밖 확인.
 
-- [ ] R13. **poll 성공 경로의 DB 커넥션 레벨 잔여 TOCTOU**(R11 독립 리뷰 M2 — 기존 재조회
+- [x] R13. **poll 성공 경로의 DB 커넥션 레벨 잔여 TOCTOU**(R11 독립 리뷰 M2 — 기존 재조회
       가드 코드, 불변식 ④): asyncio 단일 루프라도 커넥션 풀 기본값(maxsize=5, `db.py` 가
       제한 안 함)으로 같은 프로세스에서 진짜 동시 트랜잭션이 가능 — reconcile 의 UPDATE 가
       커밋 전(행 잠금)일 때 poll 의 재조회 SELECT(READ COMMITTED)가 이전 값을 읽고, 이후
       `save()`(WHERE 가 PK 뿐, CAS 없음)가 최신 행을 stale 값으로 덮어쓸 수 있음. 수정안:
       성공 경로(108-120행)도 R11 과 같은 조건부 원자 update 로 교체, 또는 풀을
       `minsize=maxsize=1` 로 제한해 단일 워커 전제를 커넥션 레벨까지 정합화(처리량 영향).
+      — **처리(2026-07-24)**: 조건부 원자 update 안 채택(풀 제한은 처리량 영향이라 배제) —
+      성공 경로를 `save(["last_success_at"])` + 만료분만 지우는 원자 UPDATE(`WHERE backoff_until
+      <=now`) + health=ok 원자 UPDATE(`WHERE backoff_until IS NULL`)로 분리해 재조회↔save 창을
+      제거. PR #43 High-2·R9 2차 High-1·R-2 보호 그대로 유지(rowcount>0 일 때만 in-memory 정합).
+      회귀 테스트 2건(커넥션 레벨 인터리브에도 미래 backoff 보존 — 미수정 코드에서 실패 재현 ·
+      평시 만료 backoff 정리+health 회복). rowcount(int) 반환은 `matches.py` CAS 클레임과 동일 관례.
+
+- [ ] R14. **poll↔reconcile 회계의 기존 구조적 잔여 3건**(R12/R13 독립 리뷰에서 발견 — 이번
+      diff 가 새로 만든 것 아님, 불변식 ④/FR-18, 빈도 낮음·발송 안전 무관):
+      ① `poll_tick` 이 틱 시작 스냅샷으로 `_is_due` 를 통과시킨 뒤 `adapter.fetch()` 직전
+      재확인이 없어, 스냅샷 이후 다른 채널이 건 backoff 를 그 틱은 놓칠 수 있음.
+      ② `health_status` 에 CAS/펜싱이 없어 동시 실패 시 `effective=max()` 계산과 저장 사이
+      경쟁으로 down 이 degraded 로 순간 역전될 수 있음(R9① 이전부터 존재).
+      ③ backoff 원자 UPDATE 성공 후 health save 가 부분 실패(크래시/취소)하면 backoff 만
+      반영되고 health 는 stale — 관측(배지) 오차이며 backoff(④) 자체는 정합. 우선순위 낮음.
 
 ## 참고 문서
 

@@ -233,3 +233,106 @@ async def test_store_failure_is_accounted(env, monkeypatch):
     assert source.last_success_at is None
     assert source.health_status == HealthStatus.degraded
     assert source.last_polled_at is not None  # 선커밋 — poll_interval 준수
+
+
+async def test_rate_limit_backoff_does_not_shorten_longer_existing(env):
+    """R12 회귀: rate-limit 회계가 다른 채널(조정)이 이미 건 **더 긴** backoff 를 자기
+    카운터 기준 짧은 후보로 덮어써 만료 시각을 단축하지 않는다(불변식 ④) — 후보>현재일
+    때만 원자적으로 덮어쓴다. 미수정 코드(무조건 덮어쓰기)에서 실패."""
+    source, _, fake = env
+    # 조정 틱이 서버 Retry-After=3600 로 건 긴 backoff 가 이미 DB 에 반영된 상황
+    long_backoff = datetime.now(UTC) + timedelta(seconds=3600)
+    await Source.filter(id=source.id).update(backoff_until=long_backoff)
+    # poll 이 첫 429(count=1 → 60초 후보)를 맞음 — 짧은 후보로 긴 backoff 를 단축하면 안 됨
+    fake.result = RateLimitedError("HTTP 429")
+
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until == long_backoff  # 긴 backoff 유지(미수정 코드는 now+60 으로 단축)
+
+
+async def test_rate_limit_backoff_extends_when_candidate_longer(env):
+    """R12 가드의 반대 방향: 후보가 현재 backoff 보다 길면 정상적으로 연장한다 —
+    조건부 원자 update 가 정당한 backoff 증가를 막지 않는다(기존 동작 보존)."""
+    source, _, fake = env
+    short = datetime.now(UTC) + timedelta(seconds=30)
+    await Source.filter(id=source.id).update(backoff_until=short)
+    fake.result = RateLimitedError("HTTP 429", retry_after_sec=3600)
+
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until is not None and fresh.backoff_until > short
+
+
+async def test_poll_success_atomic_backoff_clear_survives_connection_race(env, monkeypatch):
+    """R13 회귀: poll 성공의 backoff 정리가 재조회↔save 사이(커넥션 레벨 TOCTOU)에 조정
+    틱이 커밋한 **미래** backoff 를 지우지 않는다 — 조건부 원자 update(WHERE backoff_until
+    <=now)로 교체해 경쟁 창을 닫는다. 미수정 코드(재조회 후 backoff_until=None 저장)에서 실패."""
+    source, _, fake = env
+    fake.result = []  # 수집 성공(매칭 0) → 성공 경로 진입
+    future = datetime.now(UTC) + timedelta(minutes=5)
+    real_save = source.save
+    injected = {"done": False}
+
+    async def save_with_race(*args, **kwargs):
+        # 성공 경로의 조건부 원자 update(cleared/ok_set) 실행 **전에** 다른 채널(조정 틱)이
+        # 미래 backoff 를 커밋하는 커넥션 레벨 인터리브 재현(1회만) — 구 코드(재조회 후 stale
+        # save)는 이 개입을 놓쳐 backoff 를 지웠고, 새 코드는 WHERE 로 재평가해 보존한다.
+        if not injected["done"] and "last_success_at" in (kwargs.get("update_fields") or []):
+            injected["done"] = True
+            await Source.filter(id=source.id).update(
+                backoff_until=future, health_status=HealthStatus.degraded
+            )
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(source, "save", save_with_race)
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until == future  # 조정이 방금 건 미래 backoff 유지(미수정 코드는 None)
+    assert fresh.last_success_at is not None  # 커서 전진은 정상
+
+
+async def test_rate_limit_commits_backoff_before_health(env, monkeypatch):
+    """M1 회귀(독립 리뷰): rate-limit 회계는 backoff 를 health 보다 **먼저** 커밋한다
+    (R13 성공 경로와 대칭). 순서가 반대면 두 UPDATE 사이에 health=degraded 는 커밋됐는데
+    backoff_until 은 아직 NULL 인 창이 생겨, 그 순간 poll_tick 스냅샷이 _is_due 를 통과해
+    방금 429 를 맞은 소스에 추가 fetch 를 할 수 있다(불변식 ④). 순서가 반대인 코드에서 실패."""
+    source, _, fake = env
+    fake.result = RateLimitedError("HTTP 429")  # 사전 backoff 없음 → NULL 에서 시작
+    real_save = source.save
+    seen: dict = {}
+
+    async def save_probe(*args, **kwargs):
+        # health_status 저장 시점엔 backoff 가 이미 DB 에 커밋돼 있어야 한다(순서 보장 검증).
+        if "health_status" in (kwargs.get("update_fields") or []):
+            row = await Source.filter(id=source.id).values_list("backoff_until", flat=True)
+            seen["backoff_at_health_save"] = row[0] if row else None
+        return await real_save(*args, **kwargs)
+
+    monkeypatch.setattr(source, "save", save_probe)
+    await poller.poll_source(source)
+
+    # backoff 가 health 보다 먼저 커밋됨(순서 반대인 미수정 코드는 이 시점에 None)
+    assert seen["backoff_at_health_save"] is not None
+
+
+async def test_poll_success_clears_already_expired_backoff(env):
+    """R13 평시 경로(독립 리뷰 L1): 경쟁 없이 이미 **만료된** backoff 도 성공 회계가 정상
+    정리하고 health 를 ok 로 회복한다 — R11 실패 경로 test_poll_failure_clears_expired_backoff
+    의 성공 경로 대칭(조건부 원자 update 로 교체 후에도 기존 정리 동작 보존)."""
+    source, _, fake = env
+    past = datetime.now(UTC) - timedelta(minutes=5)
+    await Source.filter(id=source.id).update(
+        backoff_until=past, health_status=HealthStatus.degraded
+    )
+    fake.result = []
+
+    await poller.poll_source(source)
+
+    fresh = await Source.get(id=source.id)
+    assert fresh.backoff_until is None  # 만료분 정리
+    assert fresh.health_status == HealthStatus.ok  # health 회복
+    assert source.backoff_until is None  # in-memory 정합
