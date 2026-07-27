@@ -84,6 +84,10 @@ function ThreadsOAuthConnectForm() {
           동의 화면을 새 창으로 열어 승인하면 콜백 페이지에 연동 값이 표시됩니다. 그 값을 통째로
           복사해 아래에 붙여넣으세요. 값은 일회용이며 곧 만료됩니다.
         </p>
+        <p className="text-xs text-gray-400">
+          이 도구는 키워드 매칭 글을 사람이 검토·승인한 뒤에만 답글을 전송합니다 — 자동 게시는
+          하지 않습니다. 부여한 권한은 답글 게시·조회 등 승인된 작업에만 사용됩니다.
+        </p>
       </div>
       <Button
         variant="secondary"

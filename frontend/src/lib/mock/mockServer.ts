@@ -438,10 +438,14 @@ const threadsOAuthUsernames = new Map<number, string>();
 function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
   requireUser();
   // 실서버처럼 state 를 URL 에 실어 형태를 맞춘다(값 검증은 아래 connect 에서).
+  // scope 는 심사 제출킷(#75, docs/app-review/SUBMISSION.md §2)의 검수 대상 Threads 권한
+  // 세트를 반영해 목 데모/스크린캐스트 대표성을 맞춘다. public_profile 은 Meta 베이스 권한이라
+  // Threads OAuth scope 토큰이 아니므로 제외(실 authorize-url 도 threads_* 만 scope 에 실림).
   const params = new URLSearchParams({
     client_id: "mock",
     redirect_uri: "https://nutti.co.kr/threads-callback.html",
-    scope: "threads_basic",
+    scope:
+      "threads_basic,threads_keyword_search,threads_content_publish,threads_read_replies,threads_manage_replies",
     response_type: "code",
     state: `mock-state-${Date.now()}`,
   });
