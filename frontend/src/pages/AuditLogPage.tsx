@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { getReplyActions } from "../lib/apiClient";
+import { ApiError, getReplyActions } from "../lib/apiClient";
 import type { ReplyActionType } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Card } from "../components/ui/Card";
@@ -37,6 +37,11 @@ export default function AuditLogPage() {
     .slice()
     .sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
 
+  // 전역 감사 로그 API(GET /api/reply-actions)는 아직 백엔드 미구현(404)이다.
+  // 일반 오류와 구분해 "준비 중" 안내로 표시한다(매칭 상세의 처리 이력은 정상 동작).
+  const notImplemented =
+    query.isError && query.error instanceof ApiError && query.error.status === 404;
+
   return (
     <section className="flex flex-col gap-6">
       <div>
@@ -70,7 +75,21 @@ export default function AuditLogPage() {
 
       {matchIdInvalid && <p className="text-sm text-tone-danger">매칭 ID는 숫자로 입력해 주세요.</p>}
       {query.isLoading && <p className="text-sm text-gray-500">불러오는 중…</p>}
-      {query.isError && <p className="text-sm text-tone-danger">감사 로그를 불러오지 못했습니다.</p>}
+      {notImplemented && (
+        <Card className="flex flex-col gap-1 border-dashed bg-gray-50 text-center">
+          <p className="text-sm font-medium text-gray-700">전역 감사 로그는 아직 준비 중입니다.</p>
+          <p className="text-sm text-gray-500">
+            백엔드에서 조회 API 구현 후 이용할 수 있습니다. 개별 매칭의 처리 이력은{" "}
+            <Link to="/" className="text-brand-600 hover:underline">
+              매칭 목록
+            </Link>
+            에서 각 매칭을 열어 확인할 수 있습니다.
+          </p>
+        </Card>
+      )}
+      {query.isError && !notImplemented && (
+        <p className="text-sm text-tone-danger">감사 로그를 불러오지 못했습니다.</p>
+      )}
 
       {query.data && (
         <Table>
