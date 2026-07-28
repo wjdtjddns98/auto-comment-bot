@@ -183,7 +183,11 @@ export default function MatchDetailPage() {
 
       <Card className="flex flex-col gap-2">
         <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm text-gray-500">
-          <span>소스: {source ? getSourceDisplayName(source) : `#${match.source_id}`}</span>
+          <span className="inline-flex flex-wrap items-center gap-1.5">
+            소스: {source ? getSourceDisplayName(source) : `#${match.source_id}`}
+            {/* 목록(#73)과 동일하게 비활성 소스는 배지로 표시 — 화면 간 상태 표시 일관성. */}
+            {source && !source.enabled && <Badge tone="neutral">비활성</Badge>}
+          </span>
           <span>작성자: {match.author ?? "-"}</span>
           <span>게시일시: {formatDateTime(match.published_at)}</span>
           <span>매칭일시: {formatDateTime(match.matched_at)}</span>
