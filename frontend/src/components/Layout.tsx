@@ -85,7 +85,7 @@ export function Layout() {
         <div className="flex items-center gap-x-4 px-4 py-3 sm:px-6">
           <Link
             to="/"
-            className="flex items-center gap-2 whitespace-nowrap font-bold text-gray-900 hover:text-brand-600"
+            className="flex items-center gap-2 whitespace-nowrap font-bold text-gray-900"
           >
             <LogoMark />
             SNS 키워드 모니터
