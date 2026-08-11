@@ -11,16 +11,21 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // ProtectedRoute 가 넘긴 원래 목적지로 되돌린다. 쿼리스트링까지 보존해야 하는 이유:
+  // Threads OAuth 콜백(`?code=...&state=...`)이 로그아웃 상태로 도착하면 pathname 만
+  // 살릴 경우 1회용 연동 값이 통째로 사라진다.
+  const from = (location.state as { from?: { pathname: string; search?: string } } | null)?.from;
+  const redirectTo = from ? `${from.pathname}${from.search ?? ""}` : "/";
+
   if (user) {
-    const from = (location.state as { from?: { pathname: string } } | null)?.from?.pathname ?? "/";
-    return <Navigate to={from} replace />;
+    return <Navigate to={redirectTo} replace />;
   }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     try {
       await login(email, password);
-      navigate("/", { replace: true });
+      navigate(redirectTo, { replace: true });
     } catch {
       // 실패 사유는 loginError 로 화면에 표시됨
     }

@@ -17,8 +17,23 @@ import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field, Input, Select, Textarea } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
+import { THREADS_OAUTH_DISPLAY_NAME_KEY } from "../lib/threadsOAuth";
 
 const PLATFORMS: SnsPlatform[] = ["threads", "naver_cafe", "community"];
+
+// 서버가 준 동의 화면 URL 의 redirect_uri 가 이 앱을 가리키면 콜백 라우트가 연동을 자동으로
+// 끝낸다 → 같은 탭에서 이동한다(팝업 차단·복붙 없음). 아직 외부 정적 콜백 페이지를 가리키면
+// 기존대로 새 창으로 열고 연동 값을 붙여넣게 둔다. 백엔드 THREADS_REDIRECT_URI 설정만으로
+// 두 경로가 갈리므로 FE 는 배포 순서와 무관하게 동작한다.
+function usesInAppCallback(authorizeUrl: string): boolean {
+  try {
+    const redirect = new URL(authorizeUrl).searchParams.get("redirect_uri");
+    if (!redirect) return false;
+    return new URL(redirect, window.location.origin).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
 
 // 콜백 페이지가 표시하는 연동 값(`code=...&state=...`) 또는 전체 콜백 URL 붙여넣기를
 // code/state 로 분리한다(docs/API-SPEC.md §threads-oauth — state 는 서버 검증 필수).
@@ -46,6 +61,14 @@ function ThreadsOAuthConnectForm() {
     mutationFn: getThreadsOAuthAuthorizeUrl,
     onSuccess: ({ url }) => {
       setError(null);
+      if (usesInAppCallback(url)) {
+        // 전체 페이지 이동이라 폼 상태가 끊긴다 — 표시 이름만 콜백까지 넘긴다.
+        const name = displayName.trim();
+        if (name) sessionStorage.setItem(THREADS_OAUTH_DISPLAY_NAME_KEY, name);
+        else sessionStorage.removeItem(THREADS_OAUTH_DISPLAY_NAME_KEY);
+        window.location.assign(url);
+        return;
+      }
       const opened = window.open(url, "_blank", "noopener,noreferrer");
       setAuthorizeUrl(opened ? null : url);
     },
@@ -81,13 +104,22 @@ function ThreadsOAuthConnectForm() {
       <div>
         <h2 className="text-sm font-semibold text-gray-900">Threads 동의 화면으로 연동</h2>
         <p className="text-xs text-gray-500">
-          동의 화면을 새 창으로 열어 승인하면 콜백 페이지에 연동 값이 표시됩니다. 그 값을 통째로
-          복사해 아래에 붙여넣으세요. 값은 일회용이며 곧 만료됩니다.
+          Threads 동의 화면에서 승인하면 연동이 이어서 완료됩니다. 표시 이름을 먼저 입력한 뒤
+          연결을 시작하세요.
         </p>
         <p className="text-xs text-gray-400">
           이 도구는 키워드 매칭 글을 사람이 검토·승인한 뒤에만 답글을 전송합니다 — 자동 게시는
           하지 않습니다. 부여한 권한은 답글 게시·조회 등 승인된 작업에만 사용됩니다.
         </p>
+      </div>
+      <div className="flex flex-wrap gap-4">
+        <Field label="표시 이름 (선택)">
+          <Input
+            value={displayName}
+            onChange={(e) => setDisplayName(e.target.value)}
+            placeholder="예: @nutti_official"
+          />
+        </Field>
       </div>
       <Button
         variant="secondary"
@@ -106,26 +138,30 @@ function ThreadsOAuthConnectForm() {
           .
         </p>
       )}
-      <div className="flex flex-wrap gap-4">
-        <Field label="연동 값">
-          <Input
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            placeholder="콜백 페이지의 code=...&state=... 또는 전체 URL"
-          />
-        </Field>
-        <Field label="표시 이름 (선택)">
-          <Input
-            value={displayName}
-            onChange={(e) => setDisplayName(e.target.value)}
-            placeholder="예: @nutti_official"
-          />
-        </Field>
-      </div>
       {error && <p className="text-sm text-tone-danger">{error}</p>}
-      <Button onClick={handleConnect} disabled={connectMutation.isPending} className="self-start">
-        {connectMutation.isPending ? "연동 중…" : "연동 완료"}
-      </Button>
+      {/* 콜백이 아직 외부 정적 페이지를 가리키는 배포에서는 연동 값을 손으로 옮겨야 한다.
+          자동 콜백으로 전환된 뒤에도 승인 직후 창이 닫히는 등의 사고를 위한 수동 경로로 남긴다. */}
+      <details className="border-t border-gray-200 pt-3">
+        <summary className="cursor-pointer text-xs text-gray-500">
+          콜백 페이지에서 연동 값을 안내받았나요? (수동 입력)
+        </summary>
+        <div className="mt-3 flex flex-col gap-3">
+          <Field label="연동 값">
+            <Input
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="콜백 페이지의 code=...&state=... 또는 전체 URL"
+            />
+          </Field>
+          <Button
+            onClick={handleConnect}
+            disabled={connectMutation.isPending}
+            className="self-start"
+          >
+            {connectMutation.isPending ? "연동 중…" : "연동 완료"}
+          </Button>
+        </div>
+      </details>
     </Card>
   );
 }

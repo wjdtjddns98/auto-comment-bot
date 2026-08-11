@@ -30,6 +30,7 @@ import {
   MOCK_USERS,
   type MockUserRecord,
 } from "./fixtures";
+import { THREADS_OAUTH_CALLBACK_PATH } from "../threadsOAuth";
 
 export class MockApiError extends Error {
   status: number;
@@ -441,15 +442,22 @@ function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
   // scope 는 심사 제출킷(#75, docs/app-review/SUBMISSION.md §2)의 검수 대상 Threads 권한
   // 세트를 반영해 목 데모/스크린캐스트 대표성을 맞춘다. public_profile 은 Meta 베이스 권한이라
   // Threads OAuth scope 토큰이 아니므로 제외(실 authorize-url 도 threads_* 만 scope 에 실림).
+  //
+  // redirect_uri 는 앱 콜백 라우트로 둔다 — FE 의 자동 연동 경로(같은 탭 이동 → 콜백이 교환)를
+  // 백엔드·실 Meta 앱 없이 QA 하기 위함이다. 목에는 동의 화면이 없으므로 승인 단계를 건너뛰고
+  // 곧바로 콜백으로 되돌린다(실서버에서는 threads.net 동의 화면을 한 번 거친다).
+  const redirectUri = `${window.location.origin}${THREADS_OAUTH_CALLBACK_PATH}`;
+  const state = `mock-state-${Date.now()}`;
   const params = new URLSearchParams({
     client_id: "mock",
-    redirect_uri: "https://nutti.co.kr/threads-callback.html",
+    redirect_uri: redirectUri,
     scope:
       "threads_basic,threads_keyword_search,threads_content_publish,threads_read_replies,threads_manage_replies",
     response_type: "code",
-    state: `mock-state-${Date.now()}`,
+    state,
+    code: `mock-code-${Date.now()}`,
   });
-  return { url: `https://www.threads.net/oauth/authorize?${params.toString()}` };
+  return { url: `${redirectUri}?${params.toString()}` };
 }
 
 // 실서버 계약(state 필수)을 모의해 FE 가 state 를 빠뜨리는 드리프트를 mock QA 에서 잡는다.

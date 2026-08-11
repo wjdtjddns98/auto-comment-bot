@@ -12,6 +12,8 @@ import AdminSnsAccountsPage from "./pages/AdminSnsAccountsPage";
 import AdminUsersPage from "./pages/AdminUsersPage";
 import AuditLogPage from "./pages/AuditLogPage";
 import DebugHealthPage from "./pages/DebugHealthPage";
+import ThreadsOAuthCallbackPage from "./pages/ThreadsOAuthCallbackPage";
+import { THREADS_OAUTH_CALLBACK_PATH } from "./lib/threadsOAuth";
 
 export default function App() {
   return (
@@ -59,6 +61,7 @@ export default function App() {
           }
         />
         <Route path="/sns-accounts" element={<AdminSnsAccountsPage />} />
+        <Route path={THREADS_OAUTH_CALLBACK_PATH} element={<ThreadsOAuthCallbackPage />} />
         <Route path="/audit-log" element={<AuditLogPage />} />
         <Route path="/debug/health" element={<DebugHealthPage />} />
       </Route>
