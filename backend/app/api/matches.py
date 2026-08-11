@@ -15,10 +15,12 @@ from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from app import reply as reply_flow
+from app import templating
 from app.api.deps import current_user, require_csrf
 from app.api.sns_accounts import visible_accounts
 from app.models import (
     AccountStatus,
+    Keyword,
     MatchedPost,
     Platform,
     PostStatus,
@@ -344,6 +346,77 @@ async def _approve(
         # 결정(ignored 등)을 존중해 덮어쓰지 않는다.
         logger.warning("sent 기록 시점에 클레임 소유권 상실 — 상태 미변경 match=%s", match_id)
     return ApproveOut(action="sent", external_reply_id=external_reply_id[:512])
+
+
+class RenderIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    template_id: int
+    # 일괄 발송 대상 — FE 선택분. 상한은 화면에서 고를 수 있는 수준으로 넉넉히 둔다.
+    match_ids: list[int] = Field(min_length=1, max_length=200)
+
+
+class RenderItem(BaseModel):
+    match_id: int
+    body: str | None  # 렌더 실패 시 null
+    error: str | None = None
+
+
+class RenderOut(BaseModel):
+    items: list[RenderItem]
+
+
+@router.post("/render-template")
+async def render_template(
+    body: RenderIn, user: Annotated[User, Depends(current_user)]
+) -> RenderOut:
+    """선택한 매칭들에 템플릿을 적용한 **문구 미리보기**를 돌려준다(일괄 발송용).
+
+    **전송하지 않는다** — 사람이 이 결과를 보고 approve 를 눌러야 발송된다(불변식 ①).
+    CSRF 를 요구하지 않는 이유도 그것이다(상태를 바꾸지 않는 조회성 POST — body 로
+    id 목록을 받아야 해서 GET 이 아니다).
+
+    `{{a|b|c}}` 변형이 건마다 독립적으로 뽑히므로 **같은 템플릿으로도 문구가 갈린다** —
+    일괄 발송에서 N건 동일 문구가 중복 콘텐츠로 스팸 판정되는 것을 줄이는 것이 목적이다
+    (`app/templating.py` 참조). FE 는 받은 `body` 를 그대로 approve 의 `final_body` 로
+    보내면 되고, 사람이 수정해도 된다(그게 사람 승인이다).
+
+    렌더 실패는 **그 건만** `body=null` + `error` 로 표시한다 — 한 건의 변수 누락이
+    나머지 미리보기를 막지 않게. FE 는 그 건을 대상에서 빼면 된다.
+    """
+    template = await ReplyTemplate.get_or_none(id=body.template_id, enabled=True)
+    if template is None:
+        raise HTTPException(status_code=422, detail="template_id: 템플릿이 없거나 비활성입니다")
+    posts = await MatchedPost.filter(id__in=body.match_ids).only(
+        "id", "author", "url", "matched_keyword_id"
+    )
+    found = {p.id: p for p in posts}
+    # 키워드는 한 번에 조회한다(N+1 방지). matched_keyword 는 nullable FK 라
+    # `await post.matched_keyword` 는 값이 없을 때 None 을 await 해 TypeError 가 된다.
+    kw_ids = {p.matched_keyword_id for p in posts if p.matched_keyword_id}
+    kw_patterns = (
+        {k.id: k.pattern for k in await Keyword.filter(id__in=list(kw_ids)).only("id", "pattern")}
+        if kw_ids
+        else {}
+    )
+    items: list[RenderItem] = []
+    for match_id in body.match_ids:
+        post = found.get(match_id)
+        if post is None:
+            items.append(RenderItem(match_id=match_id, body=None, error="매칭이 없습니다"))
+            continue
+        context = {
+            "author": post.author,
+            "keyword": kw_patterns.get(post.matched_keyword_id),
+            "url": post.url,
+        }
+        try:
+            items.append(
+                RenderItem(match_id=match_id, body=templating.render(template.body, context))
+            )
+        except templating.TemplateRenderError as exc:
+            items.append(RenderItem(match_id=match_id, body=None, error=str(exc)))
+    return RenderOut(items=items)
 
 
 @router.post("/{match_id}/approve", dependencies=[Depends(require_csrf)])

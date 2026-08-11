@@ -170,6 +170,28 @@ Query: `status`(new|reviewing|sending|replied|ignored|verify_pending), `source_i
 ### `GET /api/matches/{id}`
 200 매칭 상세 + `reply_actions` 이력 요약.
 
+### `POST /api/matches/render-template` — 템플릿 일괄 발송용 문구 미리보기
+Req `{ template_id: int, match_ids: int[] (1~200) }` → 200 `{ items: [{ match_id, body, error }] }`.
+
+> **전송하지 않는다.** 사람이 이 미리보기를 보고 approve 를 눌러야 나간다(불변식 ①).
+> 상태를 바꾸지 않는 조회성 POST 라 **CSRF 불필요**(body 로 id 목록을 받아야 해서 GET 이 아니다).
+> reviewer 도 호출 가능(일괄 발송 주체).
+
+- **왜 필요한가**: 일괄 발송이 N건에 **완전히 동일한 문구**를 보내면 rate-limit 과 무관하게
+  중복 콘텐츠로 스팸 판정될 수 있다. 서버가 건마다 변형을 독립적으로 뽑아 문구를 갈라준다.
+- **치환 문법**(`app/templating.py`):
+  - `{{a|b|c}}` — **랜덤 변형**. 후보 중 하나. 후보 앞뒤 공백은 서식이라 strip 되고, 빈 후보
+    (`{{ !|}}`)는 "있거나 없거나" 를 뜻한다.
+  - `{{author}}`·`{{keyword}}`·`{{url}}` — 그 매칭의 작성자·매칭 키워드·원문 링크.
+    **원문 본문(`content`)은 제공하지 않는다** — 상대 글 복사는 스팸 신호다.
+- **에러는 건별**: 미지 변수(오타)·값 없는 변수(author 미확보)·없는 매칭은 그 항목만
+  `body=null` + `error` 문구. 한 건의 실패가 나머지 미리보기를 막지 않는다. FE 는 그 건을
+  대상에서 빼면 된다. 오타를 조용히 비우고 게시하지 않는 것이 원칙.
+- `items` 는 **요청 순서를 유지**한다. 없는/비활성 `template_id` 는 422, 빈 `match_ids` 422,
+  미지 키 422(extra 금지).
+- FE 는 받은 `body` 를 그대로 approve 의 `final_body` 로 보내면 되고, 사람이 수정해도 된다
+  (그게 사람 승인이다). 길이 상한(Threads 500자)은 approve 가 검사한다.
+
 ### `POST /api/matches/{id}/approve` — 핵심 (CSRF 필수)
 Req `{ template_id?: int, final_body: string, sns_account_id?: int }`
 > **M2**: 전송 가능(write) 소스(threads)의 approve/retry 는 `sns_account_id` **필수** — 없으면 422.
