@@ -75,6 +75,13 @@ function nextId(records: Array<{ id: number }>): number {
   return records.reduce((max, r) => Math.max(max, r.id), 0) + 1;
 }
 
+/** 모의 상태 배열은 모듈 상수라 재할당할 수 없다 — 조건에 맞는 항목을 제자리에서 제거한다. */
+function removeWhere<T>(records: T[], predicate: (record: T) => boolean): void {
+  for (let i = records.length - 1; i >= 0; i -= 1) {
+    if (predicate(records[i])) records.splice(i, 1);
+  }
+}
+
 function delay(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 150 + Math.random() * 200));
 }
@@ -151,12 +158,9 @@ function handleGetMatches(query: MockRequestOptions["query"]): MatchListResponse
   const start = (page - 1) * size;
   const paged = items.slice(start, start + size);
   // 목록은 요약만(최대 500자) — 전체 본문은 상세 API 에서. backend/app/api/matches.py 와 동일한 규칙.
-  // 항상 복사본을 만든다: approve/ignore 가 원본 객체를 in-place 로 변형하므로 같은 참조를 그대로
-  // 돌려주면 React Query 의 구조적 공유가 "변경 없음"으로 오판해, 목록 화면에 머문 채 상태가 바뀌는
-  // 경우(일괄 발송) 리렌더가 누락된다. 실서버는 매 요청 새 JSON 을 주므로 그쪽 동작에 맞춘다
-  // (소스 목록도 같은 이유로 복사본을 반환한다 — handleGetSources 주석 참조).
+  // (원본 참조를 그대로 돌려줘도 되는 이유는 mockRequest 가 응답을 깊은 복사하기 때문 — 그쪽 주석 참조.)
   const summarized = paged.map((m) =>
-    m.content.length > 500 ? { ...m, content: m.content.slice(0, 500) } : { ...m }
+    m.content.length > 500 ? { ...m, content: m.content.slice(0, 500) } : m
   );
   return { items: summarized, total };
 }
@@ -299,16 +303,32 @@ function handlePatchSource(id: number, body: unknown): Source {
   return record;
 }
 
+// 삭제 규칙은 docs/API-SPEC.md §소스 기준(2026-08-11 제품 결정, PR #91):
+// 매칭·발송 이력·스코프 키워드는 소스와 함께 정리되고, 차단은 전송 진행 중일 때만이다.
+// 발송 이력 보존 목적의 409 는 제거됐다 — 그 차단을 남겨두면 mock QA 에서 실서버가 주지
+// 않는 409 를 보게 되어 FE 가 잘못된 안내를 만들게 된다.
 function handleDeleteSource(id: number): void {
   requireUser();
   const idx = sources.findIndex((s) => s.id === id);
   if (idx === -1) throw new MockApiError(404, "소스를 찾을 수 없습니다.");
-  if (matchedPosts.some((m) => m.source_id === id)) {
-    throw new MockApiError(409, "매칭 이력이 있는 소스는 삭제할 수 없습니다. 비활성화를 사용하세요.");
+  // 감사 보존이 아니라 정합성 보호 — sending 은 결과 기록 대상이 사라지면 유령 전송이 되고,
+  // verify_pending 은 조정 판정 중이라 지우면 "게시됐는지 모름"이 영구 미해결로 남는다.
+  const inFlight = matchedPosts.some(
+    (m) => m.source_id === id && (m.status === "sending" || m.status === "verify_pending")
+  );
+  if (inFlight) {
+    throw new MockApiError(
+      409,
+      "전송 진행 중인 매칭이 있는 소스는 삭제할 수 없습니다" +
+        " — 전송/조정이 끝난 뒤 다시 시도해 주세요(enabled=false 로 먼저 중단)"
+    );
   }
-  if (keywords.some((k) => k.source_scope === id)) {
-    throw new MockApiError(409, "이 소스를 범위로 지정한 키워드가 있어 삭제할 수 없습니다. 비활성화를 사용하세요.");
-  }
+  // 실서버와 같은 순서로 정리한다: 이력 → 매칭 → 스코프 키워드 → 소스.
+  const matchIds = new Set(matchedPosts.filter((m) => m.source_id === id).map((m) => m.id));
+  removeWhere(replyActions, (r) => matchIds.has(r.matched_post_id));
+  removeWhere(matchedPosts, (m) => m.source_id === id);
+  // 전역 키워드(source_scope === null)는 무관 — 이 소스를 범위로 지정한 것만 지운다.
+  removeWhere(keywords, (k) => k.source_scope === id);
   sources.splice(idx, 1);
 }
 
@@ -410,6 +430,20 @@ function handleCreateSnsAccount(body: unknown): SnsAccount {
     credentials?: Record<string, unknown>;
   };
   validateSnsCredentials(req.platform, req.credentials);
+  // threads 는 등록 시 서버가 토큰으로 프로필(/me)을 조회해 안정 식별자를 확보하고, 같은 신원이
+  // 이미 있으면 새 행을 만들지 않고 그 계정의 자격증명을 교체해 201 로 돌려준다(PR #86).
+  // 계정 id 가 보존돼야 소스 config 의 sns_account_id 참조가 고아가 되지 않는다.
+  if (req.platform === "threads") {
+    const identity = mockThreadsIdentity(req.credentials?.access_token);
+    const existing = findThreadsAccountByIdentity(user.id, identity);
+    if (existing) {
+      existing.status = "active";
+      // 수동 등록 토큰은 만료 시각을 알 수 없다(OAuth 연동과 달리 null 유지).
+      existing.token_expires_at = null;
+      if (req.display_name) existing.display_name = req.display_name;
+      return existing;
+    }
+  }
   // credentials 는 실제로는 서버가 즉시 암호화해 별도 테이블에 저장 — 모의 서버는 아예 보관하지 않는다.
   // 생성 주체에게 자동 귀속(타인 명의 등록 불가) — 소유자 지정 입력 자체가 없다.
   const record: SnsAccount = {
@@ -421,6 +455,9 @@ function handleCreateSnsAccount(body: unknown): SnsAccount {
     token_expires_at: null,
   };
   snsAccounts.push(record);
+  if (req.platform === "threads") {
+    threadsIdentities.set(record.id, mockThreadsIdentity(req.credentials?.access_token));
+  }
   return record;
 }
 
@@ -434,10 +471,26 @@ function handleDeleteSnsAccount(id: number): void {
   snsAccounts.splice(idx, 1);
 }
 
-// Threads OAuth 연동 모의: 재연동(같은 code 접두) 시 새 행이 아니라 기존 행을 갱신하는
-// 실서버 동작(계정 id 보존)을 재현하기 위해 계정 id → 모의 platform_username 을 별도로 추적한다
-// (SnsAccount 응답 스키마엔 platform_username 이 없다 — 백엔드 SnsAccountOut 과 동일).
-const threadsOAuthUsernames = new Map<number, string>();
+// 재연동·재등록 시 새 행이 아니라 기존 행을 갱신하는 실서버 동작(계정 id 보존)을 재현하기 위해
+// 계정 id → 모의 Threads 신원을 별도로 추적한다(SnsAccount 응답 스키마엔 식별자가 없다 —
+// 백엔드 SnsAccountOut 과 동일).
+//
+// 실서버는 액세스 토큰으로 /me 를 조회해 신원을 얻지만 모의 서버엔 업스트림이 없으므로 입력값에서
+// 파생한다. 그래서 같은 실계정을 OAuth 로 연동한 뒤 수동 토큰으로 등록하면 실서버에서는 한 행으로
+// 수렴하지만 모의 서버에서는 갈라진다 — 알려진 모의 한계이며, 각 경로 안에서의 중복 방지(계정 증식)는
+// 그대로 재현된다.
+const threadsIdentities = new Map<number, string>();
+
+function mockThreadsIdentity(credential: unknown): string {
+  const value = typeof credential === "string" ? credential.trim() : "";
+  return `mock-identity-${value.slice(-12) || "unknown"}`;
+}
+
+function findThreadsAccountByIdentity(userId: number, identity: string): SnsAccount | undefined {
+  return snsAccounts.find(
+    (a) => a.user_id === userId && a.platform === "threads" && threadsIdentities.get(a.id) === identity
+  );
+}
 
 function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
   requireUser();
@@ -473,12 +526,7 @@ function handleThreadsOAuthConnect(body: unknown): SnsAccount {
   }
   const username = `mock_${code.slice(0, 12)}`;
   const tokenExpiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString();
-  const existing = snsAccounts.find(
-    (a) =>
-      a.user_id === user.id &&
-      a.platform === "threads" &&
-      threadsOAuthUsernames.get(a.id) === username
-  );
+  const existing = findThreadsAccountByIdentity(user.id, username);
   if (existing) {
     existing.status = "active";
     existing.token_expires_at = tokenExpiresAt;
@@ -494,7 +542,7 @@ function handleThreadsOAuthConnect(body: unknown): SnsAccount {
     token_expires_at: tokenExpiresAt,
   };
   snsAccounts.push(record);
-  threadsOAuthUsernames.set(record.id, username);
+  threadsIdentities.set(record.id, username);
   return record;
 }
 
@@ -507,6 +555,19 @@ function handleUpdateSnsAccountCredentials(id: number, body: unknown): void {
   }
   const req = (body ?? {}) as { credentials?: Record<string, unknown> };
   validateSnsCredentials(record.platform, req.credentials);
+  // threads 는 교체 토큰으로도 프로필을 조회해 식별자를 채운다(수동 등록 계정의 자기 치유).
+  // 그 신원이 이미 다른 항목에 연결돼 있으면 409 로 막고 아무것도 바꾸지 않는다(PR #86).
+  if (record.platform === "threads") {
+    const identity = mockThreadsIdentity(req.credentials?.access_token);
+    const owner = findThreadsAccountByIdentity(record.user_id, identity);
+    if (owner && owner.id !== record.id) {
+      throw new MockApiError(
+        409,
+        "같은 Threads 계정이 이미 다른 항목에 연결돼 있습니다 — 그 항목에서 교체해 주세요"
+      );
+    }
+    threadsIdentities.set(record.id, identity);
+  }
   // credentials 는 실제로는 서버가 즉시 암호화해 재저장 — 모의 서버는 보관하지 않는다.
   record.status = "active";
   record.token_expires_at = null;
@@ -737,5 +798,10 @@ export async function mockRequest<T>(path: string, options: MockRequestOptions):
   const method = options.method ?? "GET";
   const route = matchRoute(method, path);
   if (!route) throw new MockApiError(404, `모의 서버에 정의되지 않은 경로: ${method} ${path}`);
-  return route.handler(route.params, options.query, options.body) as T;
+  const result = route.handler(route.params, options.query, options.body);
+  // 응답은 항상 깊은 복사본으로 돌려준다. 핸들러들이 모의 상태를 in-place 로 변형하는데(approve 가
+  // status 를, 계정 채택이 display_name 을 바꾸는 식) 같은 객체 참조를 그대로 반환하면 React Query 의
+  // 구조적 공유가 "변경 없음"으로 판단해 data 참조가 유지되고, 화면에 머문 채 갱신하는 경우 리렌더가
+  // 통째로 누락된다. 실서버는 매 요청 새 JSON 을 파싱해 주므로 이쪽이 실제 동작에 맞다.
+  return structuredClone(result) as T;
 }

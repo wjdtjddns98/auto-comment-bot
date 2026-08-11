@@ -196,7 +196,9 @@ function SourceRow({ source }: { source: Source }) {
       queryClient.invalidateQueries({ queryKey: ["matches"] });
       queryClient.invalidateQueries({ queryKey: ["keywords"] });
     },
-    // 409(감사 보호: 실발송·결과 불명 이력/전송 진행 중)는 서버 문구를 그대로 노출하고, 비활성화 액션을 안내한다.
+    // 409 는 전송 진행 중(sending·verify_pending)일 때만 온다 — 발송 이력 보존 목적의 차단은
+    // 제거됐다(PR #91). 영구 대안이 아니라 "먼저 멈추고 조정이 끝나면 다시 삭제"를 위한 것이므로
+    // 서버 문구를 그대로 노출하고 비활성화 액션을 함께 제시한다.
     onError: (err) => {
       setError(describeApiError(err));
       setDeleteBlocked(err instanceof ApiError && err.status === 409);
@@ -356,7 +358,7 @@ function SourceRow({ source }: { source: Source }) {
                   disabled={patchMutation.isPending}
                   onClick={() => patchMutation.mutate({ enabled: false })}
                 >
-                  대신 비활성화
+                  먼저 비활성화
                 </Button>
               )}
             </div>
