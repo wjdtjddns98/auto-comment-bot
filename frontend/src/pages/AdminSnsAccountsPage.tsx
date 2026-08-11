@@ -56,11 +56,18 @@ function ThreadsOAuthConnectForm() {
   const [error, setError] = useState<string | null>(null);
   // 팝업이 차단돼 window.open 이 실패하면 수동으로 열 수 있게 URL 을 노출한다.
   const [authorizeUrl, setAuthorizeUrl] = useState<string | null>(null);
+  // 서버가 외부 콜백 페이지를 가리키는 배포 — 승인 뒤 연동 값을 손으로 옮겨야 한다.
+  // 판정 결과를 렌더에 남겨 안내 문구와 수동 입력 영역 펼침을 그 경로에 맞춘다.
+  const [manualHandoff, setManualHandoff] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  // 붙여넣기 경로에도 자동 콜백과 같은 완료 확인을 남긴다(어느 계정이 붙었는지 화면에 드러남).
+  const [connected, setConnected] = useState<SnsAccount | null>(null);
 
   const authorizeMutation = useMutation({
     mutationFn: getThreadsOAuthAuthorizeUrl,
     onSuccess: ({ url }) => {
       setError(null);
+      setConnected(null);
       if (usesInAppCallback(url)) {
         // 전체 페이지 이동이라 폼 상태가 끊긴다 — 표시 이름만 콜백까지 넘긴다.
         const name = displayName.trim();
@@ -69,6 +76,8 @@ function ThreadsOAuthConnectForm() {
         window.location.assign(url);
         return;
       }
+      setManualHandoff(true);
+      setManualOpen(true);
       const opened = window.open(url, "_blank", "noopener,noreferrer");
       setAuthorizeUrl(opened ? null : url);
     },
@@ -77,10 +86,11 @@ function ThreadsOAuthConnectForm() {
 
   const connectMutation = useMutation({
     mutationFn: connectThreadsOAuth,
-    onSuccess: () => {
+    onSuccess: (account) => {
       setCode("");
       setDisplayName("");
       setError(null);
+      setConnected(account);
       queryClient.invalidateQueries({ queryKey: ["snsAccounts"] });
     },
     onError: (err) => setError(describeApiError(err)),
@@ -104,8 +114,8 @@ function ThreadsOAuthConnectForm() {
       <div>
         <h2 className="text-sm font-semibold text-gray-900">Threads 동의 화면으로 연동</h2>
         <p className="text-xs text-gray-500">
-          Threads 동의 화면에서 승인하면 연동이 이어서 완료됩니다. 표시 이름을 먼저 입력한 뒤
-          연결을 시작하세요.
+          Threads 동의 화면에서 승인하면 연동이 이어집니다. 표시 이름을 정해 두려면 연결을
+          시작하기 전에 먼저 입력하세요.
         </p>
         <p className="text-xs text-gray-400">
           이 도구는 키워드 매칭 글을 사람이 검토·승인한 뒤에만 답글을 전송합니다 — 자동 게시는
@@ -121,6 +131,9 @@ function ThreadsOAuthConnectForm() {
           />
         </Field>
       </div>
+      <p className="-mt-2 text-xs text-gray-500">
+        비워두면 연결된 Threads 계정의 username 이 그대로 표시 이름이 됩니다.
+      </p>
       <Button
         variant="secondary"
         className="self-start"
@@ -129,19 +142,46 @@ function ThreadsOAuthConnectForm() {
       >
         {authorizeMutation.isPending ? "여는 중…" : "Threads로 연결"}
       </Button>
-      {authorizeUrl && (
+      {/* 팝업이 떴는지 차단됐는지에 따라 첫 문장만 갈리고, 그 뒤 수동 운반 안내는 공통이다.
+          두 문구를 따로 쓰면 차단 시 "새 창으로 열었습니다"와 "차단된 것 같습니다"가 함께 뜬다. */}
+      {manualHandoff && (
         <p className="text-xs text-gray-500">
-          팝업이 차단된 것 같습니다.{" "}
-          <a href={authorizeUrl} target="_blank" rel="noopener noreferrer" className="underline">
-            여기를 눌러 동의 화면 열기
-          </a>
-          .
+          {authorizeUrl ? (
+            <>
+              팝업이 차단된 것 같습니다.{" "}
+              <a
+                href={authorizeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline"
+              >
+                여기를 눌러 동의 화면 열기
+              </a>
+              .{" "}
+            </>
+          ) : (
+            "동의 화면을 새 창으로 열었습니다. "
+          )}
+          승인하면 콜백 페이지에 연동 값이 표시됩니다 — 그 값을 통째로 복사해 아래{" "}
+          <strong>수동 입력</strong> 칸에 붙여넣고 “연동 완료”를 누르세요. 값은 일회용이며 곧
+          만료됩니다.
+        </p>
+      )}
+      {connected && (
+        <p className="text-sm text-tone-success">
+          <strong>{connected.display_name}</strong> 계정을 연동했습니다. 아래 목록에서 확인할 수
+          있습니다.
         </p>
       )}
       {error && <p className="text-sm text-tone-danger">{error}</p>}
       {/* 콜백이 아직 외부 정적 페이지를 가리키는 배포에서는 연동 값을 손으로 옮겨야 한다.
-          자동 콜백으로 전환된 뒤에도 승인 직후 창이 닫히는 등의 사고를 위한 수동 경로로 남긴다. */}
-      <details className="border-t border-gray-200 pt-3">
+          자동 콜백으로 전환된 뒤에도 승인 직후 창이 닫히는 등의 사고를 위한 수동 경로로 남긴다.
+          외부 콜백 배포에서는 이 경로가 유일한 완료 수단이라, 연결 시작과 동시에 펼친다. */}
+      <details
+        className="border-t border-gray-200 pt-3"
+        open={manualOpen}
+        onToggle={(e) => setManualOpen(e.currentTarget.open)}
+      >
         <summary className="cursor-pointer text-xs text-gray-500">
           콜백 페이지에서 연동 값을 안내받았나요? (수동 입력)
         </summary>

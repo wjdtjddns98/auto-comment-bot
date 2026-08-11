@@ -30,7 +30,7 @@ import {
   MOCK_USERS,
   type MockUserRecord,
 } from "./fixtures";
-import { THREADS_OAUTH_CALLBACK_PATH } from "../threadsOAuth";
+import { THREADS_EXTERNAL_CALLBACK_URL, THREADS_OAUTH_CALLBACK_PATH } from "../threadsOAuth";
 
 export class MockApiError extends Error {
   status: number;
@@ -446,7 +446,15 @@ function handleThreadsAuthorizeUrl(): ThreadsOAuthAuthorizeUrlResponse {
   // redirect_uri 는 앱 콜백 라우트로 둔다 — FE 의 자동 연동 경로(같은 탭 이동 → 콜백이 교환)를
   // 백엔드·실 Meta 앱 없이 QA 하기 위함이다. 목에는 동의 화면이 없으므로 승인 단계를 건너뛰고
   // 곧바로 콜백으로 되돌린다(실서버에서는 threads.net 동의 화면을 한 번 거친다).
-  const redirectUri = `${window.location.origin}${THREADS_OAUTH_CALLBACK_PATH}`;
+  //
+  // 매직 값 `?mockCallback=external` — 아직 THREADS_REDIRECT_URI 가 외부 정적 페이지인
+  // 현 배포를 재현한다(#82 전환 전). 이쪽이 심사 스크린캐스트를 찍는 실제 경로이므로
+  // 팝업 + 수동 붙여넣기 분기도 mock 으로 QA 할 수 있어야 한다.
+  const externalCallback =
+    new URLSearchParams(window.location.search).get("mockCallback") === "external";
+  const redirectUri = externalCallback
+    ? THREADS_EXTERNAL_CALLBACK_URL
+    : `${window.location.origin}${THREADS_OAUTH_CALLBACK_PATH}`;
   const state = `mock-state-${Date.now()}`;
   const params = new URLSearchParams({
     client_id: "mock",
