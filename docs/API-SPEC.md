@@ -173,6 +173,14 @@ Req `{ template_id?: int, final_body: string, sns_account_id?: int }`
 2. 소스 `can_write=true`: `adapter.send_reply` → 성공 `reply_actions(action='sent', external_reply_id)` + `matched_posts.status='replied'` → **200** `{ action:'sent', external_reply_id }`. 확정 실패 → `reply_actions(action='failed', error)` + status 복귀 `reviewing` → **502** `{ action:'failed', detail }`. **결과 불명**(타임아웃/응답유실/5xx, M2) → `reply_actions(action='unknown', error)` + status `verify_pending` → **502** `{ action:'unknown', detail:"전송 결과 확인 중 — 자동 조정 후 재시도 가능해집니다" }` — 이때 retry 버튼을 노출하지 말 것(409 남).
 3. `can_write=false`(네이버/커뮤니티): 전송 안 함. `reply_actions(action='approved')` 기록 + status `replied` → **200** `{ action:'approved', clipboard_body }`(수동 복사용).
 - 멱등성: `reply_actions` partial unique(action='sent')로 DB가 이중 sent 차단. 재요청은 409.
+- **같은 게시물 중복 답글 차단(R16)**: 전송 소스의 approve/retry 는 클레임 전에 **같은
+  `external_post_id` 를 가진 다른 매칭**에 `sent`·`unknown` 이력이 있는지 검사하고, 있으면
+  **409** `"이 게시물에는 이미 답글을 보냈습니다(다른 소스로 중복 수집된 글) — 중복 답글은
+  스팸으로 판정될 수 있어 차단합니다"`. 위 partial unique 는 `matched_post_id` 단위라
+  **같은 글이 다른 소스로 재수집되면(dedup 키가 `(source_id, external_post_id)`) 막지
+  못했다** — 소스를 갈아타는 것만으로 이미 답한 글에 두 번째 답글이 나가는 경로였다.
+  `unknown`(결과 불명)도 차단 사유에 포함한다(게시됐을 가능성 배제 불가 → fail-safe).
+  FE 는 이 409 를 "이미 답한 글" 안내로 노출하면 좋다([FE 공유]).
 - 입력 검증(모두 CAS 클레임 전 — 상태 안 건드림): `final_body` 공백뿐/2000자 초과 422 ·
   `template_id` 미존재/비활성 422 · `sns_account_id` 는 본인 계정만(admin 전체)·active·
   소스 타입과 플랫폼 일치, 아니면 422.
