@@ -479,3 +479,71 @@ async def test_credentials_replace_identity_clash_409(oauth_session, monkeypatch
     await other.refresh_from_db()
     assert other.platform_user_id is None  # 롤백 — 부분 반영 없음
     assert (await SnsAccount.get(id=owner.id)).platform_user_id == "999"
+
+
+# ── R15: 계정 삭제가 참조 소스를 고아로 만들지 않게 막는다 ──────────────────────
+#
+# 실측(2026-08-11): 계정 26·31 이 삭제되자 그 계정을 config.sns_account_id 로 참조하던
+# 소스 110·119 가 고아가 되어 조용히 수집이 멈췄다(FetchError 만 매 틱 반복). config 가
+# JSON 필드라 FK 백스톱이 없어 DB 가 막아주지 않는다.
+
+
+async def test_delete_account_blocked_by_referring_source(oauth_session):
+    """참조 소스가 있으면 409 — 계정·소스 모두 그대로 남는다(부분 반영 없음)."""
+    from app.models import Source
+
+    client, csrf, user = oauth_session
+    account = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="참조되는 계정",
+        platform_username="ref_bot", platform_user_id=f"id-{uuid.uuid4().hex[:8]}",
+    )
+    source = await Source.create(
+        user=user, type="threads", name="간식",
+        config={"query": "간식", "sns_account_id": account.id},
+    )
+    try:
+        r = await client.delete(f"/api/sns-accounts/{account.id}", headers=csrf)
+        assert r.status_code == 409
+        assert f"소스 {source.id}" in r.json()["detail"]
+        assert await SnsAccount.get_or_none(id=account.id) is not None
+        assert await Source.get_or_none(id=source.id) is not None
+
+        # 비활성 소스도 참조로 센다 — 다시 켜면 같은 고아 상태가 되기 때문
+        await Source.filter(id=source.id).update(enabled=False)
+        assert (
+            await client.delete(f"/api/sns-accounts/{account.id}", headers=csrf)
+        ).status_code == 409
+
+        # 소스를 치우면 삭제된다
+        await source.delete()
+        r = await client.delete(f"/api/sns-accounts/{account.id}", headers=csrf)
+        assert r.status_code == 204
+        assert await SnsAccount.get_or_none(id=account.id) is None
+    finally:
+        await Source.filter(id=source.id).delete()
+        await SnsAccount.filter(id=account.id).delete()
+
+
+async def test_delete_account_unaffected_by_other_account_source(oauth_session):
+    """다른 계정을 참조하는 소스는 이 계정 삭제를 막지 않는다 — 과차단 없음."""
+    from app.models import Source
+
+    client, csrf, user = oauth_session
+    target = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="삭제 대상",
+    )
+    other = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="다른 계정",
+    )
+    source = await Source.create(
+        user=user, type="threads", name="다른 계정용",
+        config={"query": "간식", "sns_account_id": other.id},
+    )
+    try:
+        r = await client.delete(f"/api/sns-accounts/{target.id}", headers=csrf)
+        assert r.status_code == 204
+        assert await SnsAccount.get_or_none(id=target.id) is None
+        assert await Source.get_or_none(id=source.id) is not None  # 남의 소스는 무관
+    finally:
+        await Source.filter(id=source.id).delete()
+        await SnsAccount.filter(id__in=[target.id, other.id]).delete()

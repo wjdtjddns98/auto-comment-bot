@@ -151,6 +151,12 @@ Req `{ code, state, display_name? }` → 201 `{ id, user_id, platform, display_n
   502**(재시도 안내) · OAuth 설정 미비 503 · 암호화 키 미설정 503 · 그 외 키 422(extra 금지).
 
 ### `DELETE /api/sns-accounts/{id}` → 204 (secrets cascade). 본인 것만(admin 은 전체) · 타인 것은 404.
+→ **그 계정을 `config.sns_account_id` 로 참조하는 소스가 있으면 409**(R15)
+  `"이 계정을 사용하는 소스가 있어 삭제할 수 없습니다(소스 3, 7) — 소스를 먼저 삭제하거나
+  다른 계정으로 변경해 주세요"` — 참조 소스 id 를 문구에 담아 FE 가 안내에 쓸 수 있다.
+  **비활성 소스도 참조로 센다**(다시 켜면 같은 고아 상태가 되므로). 소스 config 는 JSON
+  필드라 FK 백스톱이 없어, 이 검사가 없으면 계정 삭제가 소스를 조용히 고아로 만든다
+  (실측: 소스가 `enabled=true` 인데 매 틱 `FetchError` 만 남기고 수집이 멈춘다).
 
 ---
 
