@@ -120,6 +120,12 @@ class Source(Model):
     last_success_at = fields.DatetimeField(null=True)  # 백필 커서 (FR-5)
     health_status = fields.CharEnumField(HealthStatus, max_length=16, default=HealthStatus.ok)
     backoff_until = fields.DatetimeField(null=True)
+    # 마지막 실패 원인 요약(R17). health 가 degraded/down 이어도 **이유가 DB 에 없어서**
+    # 컨테이너 로그를 봐야만 진단이 됐다(실측: 소스 119 의 고아 계정 참조를 찾는 데 지연).
+    # 저장 텍스트는 어댑터가 통제하는 안전 요약만 — 예기치 못한 예외는 타입명만 남긴다
+    # (자격증명 노출 금지, 불변식 ③ — `poller._safe_source_error`).
+    last_error = fields.CharField(max_length=500, null=True)
+    last_error_at = fields.DatetimeField(null=True)
     created_at = fields.DatetimeField(auto_now_add=True)
 
     class Meta:
