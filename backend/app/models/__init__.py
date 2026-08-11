@@ -147,7 +147,8 @@ class Keyword(Model):
 class MatchedPost(Model):
     id = fields.IntField(primary_key=True)
     # RESTRICT: DB 레벨 백스톱 — 소스 삭제 API 가 명시 순서(이력→매칭→소스)로만 지울 수
-    # 있게 한다. 실발송(sent)·전송 진행 중 매칭이 있으면 API 가 409(감사 보호, sources.py).
+    # 있게 한다. **전송 진행 중**(sending·verify_pending) 매칭이 있으면 API 가 409
+    # (정합성 보호 — sources.py). 발송 이력 보존 목적의 409 는 제거됐다(2026-08-11).
     source = fields.ForeignKeyField(
         "models.Source", related_name="matched_posts", on_delete=fields.RESTRICT
     )

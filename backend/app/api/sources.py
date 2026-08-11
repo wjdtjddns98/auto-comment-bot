@@ -15,7 +15,6 @@ from app.models import (
     Keyword,
     MatchedPost,
     PostStatus,
-    ReplyAction,
     ReplyActionLog,
     Source,
     SourceType,
@@ -135,13 +134,21 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
 
 @router.delete("/{source_id}", status_code=204, dependencies=[Depends(require_csrf)])
 async def delete_source(source_id: int) -> None:
-    """소스 삭제 — 수집물(매칭·비발송 감사 이력)과 스코프 키워드를 함께 정리한다.
+    """소스 삭제 — 수집물(매칭·발송 이력 포함)과 스코프 키워드를 함께 정리한다.
 
-    실발송 증거·조정 재료는 불가침(불변식 ②): sent **또는 unknown**(결과 불명 — 조정
-    미게시 판정이 오판일 수 있어 §3.6 이 흔적 보존을 전제) 이력이 있거나 전송 진행 중
-    (sending·verify_pending)인 매칭이 하나라도 있으면 409 — 비활성화가 정식 경로.
-    비발송 이력(approved 등)까지 함께 지우는 것은 제품 결정(2026-07-22) — 테스트/
-    오등록 소스의 원클릭 삭제 UX 를 감사 완전성보다 우선한다(전송이 개입한 이력 제외).
+    **발송 이력 보존을 위한 409 는 제거됐다(제품 결정 2026-08-11)**: 이력 보관은 운영
+    화면에서 확인하는 것으로 충분하다는 판단이라 sent/unknown 이력이 있어도 소스를
+    지운다. 이 완화가 불변식 ②(이중 발송 금지)를 훼손하지는 않는다 — 그 보장은
+    CAS 클레임과 `reply_actions(matched_post_id) WHERE action='sent'` 부분 unique
+    인덱스가 하며, 둘 다 그대로다. 다만 **같은 Threads 글이 다른 소스로 재수집되면
+    새 매칭이 되어(dedup 키가 `(source_id, external_post_id)`) 과거 발송 흔적이 남아
+    있지 않으므로**, 리뷰어가 "이 글에 전에 답했는지" 판단할 단서는 사라진다.
+
+    전송 진행 중(sending·verify_pending)인 매칭이 있으면 **여전히 409**다. 이건 감사가
+    아니라 정합성 보호다: `sending` 은 approve 가 CAS 클레임을 잡고 Threads 호출을
+    진행하는 중이라 결과를 기록할 대상이 사라지면 유령 전송이 되고, `verify_pending`
+    은 조정(reconcile)이 판정 중이라 지우면 "게시됐는지 모름"이 영구 미해결로 남는다
+    (설계 §3.6). 비활성화 후 조정이 끝나면 삭제할 수 있다.
     """
     try:
         async with in_transaction():
@@ -161,18 +168,16 @@ async def delete_source(source_id: int) -> None:
             # 행이 사라져 0행 → abort. 이중 게시·유령 전송 경로 없음).
             matches = await MatchedPost.filter(source_id=source_id).select_for_update()
             match_ids = [m.id for m in matches]
+            # 전송 진행 중만 차단한다(정합성 보호 — docstring 참조). 발송 이력 보존
+            # 목적의 차단은 제거됐다.
             in_flight = any(
                 m.status in (PostStatus.sending, PostStatus.verify_pending) for m in matches
             )
-            has_send_history = bool(match_ids) and await ReplyActionLog.filter(
-                matched_post_id__in=match_ids,
-                action__in=(ReplyAction.sent, ReplyAction.unknown),
-            ).exists()
-            if in_flight or has_send_history:
+            if in_flight:
                 raise HTTPException(
                     status_code=409,
-                    detail="실발송·결과 불명 이력이 있거나 전송 진행 중인 매칭이 있는 소스는"
-                    " 삭제할 수 없습니다(감사 보호) — enabled=false 비활성화가 정식 경로입니다",
+                    detail="전송 진행 중인 매칭이 있는 소스는 삭제할 수 없습니다"
+                    " — 전송/조정이 끝난 뒤 다시 시도해 주세요(enabled=false 로 먼저 중단)",
                 )
             # RESTRICT 3중(이력→매칭→소스) 순서대로 명시 삭제 — DB cascade 아님.
             # 관계 필터 삭제(matched_post__source_id)는 pg 에서 DELETE+JOIN 구문 오류라
