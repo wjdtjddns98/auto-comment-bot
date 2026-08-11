@@ -205,6 +205,28 @@ async def _approve(
             status=PostStatus.replied, verify_meta=None
         )
         raise HTTPException(status_code=409, detail="이미 전송된 매칭입니다")
+    if will_send:
+        # **같은 플랫폼 글(external_post_id)에 이미 보냈으면 다른 매칭으로도 막는다**(R16).
+        # 위 가드는 `matched_post_id` 단위라 같은 글이 **다른 소스로 재수집**되면 통과한다 —
+        # dedup 키가 `(source_id, external_post_id)` 이고 부분 unique 인덱스도
+        # `matched_post_id` 기준이기 때문(실측: 글 18059745272708845 이 매칭 104 `replied`·
+        # 5006 `new` 로 동존). 소스를 갈아타는 것만으로 이미 답한 글에 두 번째 답글이
+        # 나가는 경로였다. 대상 글 기준으로 좁히는 것이 Threads 쪽에서 본 "중복 답글" 의
+        # 실제 단위다.
+        # `unknown`(결과 불명)도 포함한다 — 게시됐을 가능성을 배제할 수 없으므로 보내지
+        # 않는 쪽이 안전하다(설계 §2 의 fail-safe 와 같은 방향).
+        sibling_ids = await MatchedPost.filter(
+            external_post_id=post.external_post_id
+        ).exclude(id=match_id).values_list("id", flat=True)
+        if sibling_ids and await ReplyActionLog.filter(
+            matched_post_id__in=list(sibling_ids),
+            action__in=(ReplyAction.sent, ReplyAction.unknown),
+        ).exists():
+            raise HTTPException(
+                status_code=409,
+                detail="이 게시물에는 이미 답글을 보냈습니다(다른 소스로 중복 수집된 글)"
+                " — 중복 답글은 스팸으로 판정될 수 있어 차단합니다",
+            )
 
     # CAS 클레임(불변식 ② 1단계): 원자적 조건부 UPDATE 로 선점 — 0행이면 abort(MUST-FIX #1).
     # claim_ts 는 펜싱 토큰을 겸한다: 이후 모든 상태 갱신은 "내 클레임이 아직 유효할 때만".

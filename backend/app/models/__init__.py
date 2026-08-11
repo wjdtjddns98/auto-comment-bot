@@ -173,7 +173,10 @@ class MatchedPost(Model):
     class Meta:
         table = "matched_posts"
         unique_together = (("source", "external_post_id"),)  # dedup (FR-2)
-        indexes = (("status",), ("source_id", "matched_at"))
+        # external_post_id 단독 인덱스(R16): approve 가 "같은 플랫폼 글에 이미 보냈나"를
+        # 소스 무관하게 조회한다. unique_together 는 (source_id, …) 가 선두라 이 조회에
+        # 쓰이지 않는다.
+        indexes = (("status",), ("source_id", "matched_at"), ("external_post_id",))
 
 
 class ReplyTemplate(Model):

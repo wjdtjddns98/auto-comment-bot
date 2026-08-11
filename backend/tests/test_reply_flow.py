@@ -564,3 +564,137 @@ def test_uvicorn_single_worker_config():
     assert "uvicorn" in cmd
     # --workers 미지정(기본 1) 또는 명시적 1 만 허용
     assert "--workers" not in cmd or '"--workers", "1"' in cmd
+
+
+# ── R16: 같은 플랫폼 글에 이미 보냈으면 다른 매칭으로도 막는다 ──────────────────
+#
+# 실측 배경(2026-08-11): dedup 키가 `(source_id, external_post_id)` 라서 같은 Threads 글이
+# 다른 소스로 재수집되면 **새 매칭**이 된다. 기존 이중 발송 방어(CAS·부분 unique·사전
+# sent 가드)는 전부 `matched_post_id` 기준이라 이 경로를 막지 못했다 — 글
+# 18059745272708845 이 매칭 104(`replied`)·5006(`new`)로 동존한 것이 실제 사례다.
+
+
+async def test_approve_blocks_same_external_post_across_sources(reviewer_session, monkeypatch):
+    """같은 external_post_id 를 가진 **다른 소스의 매칭**은 approve 409 — 전송 호출 0회."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter()
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    account = await _make_threads_account(user)
+    external_id = f"ext-dup-{uuid.uuid4().hex}"
+
+    # 소스 A: 이미 전송 완료된 매칭
+    src_a = await Source.create(
+        user=user, type=SourceType.threads, config={"query": "간식", "sns_account_id": account.id}
+    )
+    sent_match = await MatchedPost.create(
+        source=src_a, external_post_id=external_id, content="본문", status=PostStatus.replied
+    )
+    await ReplyActionLog.create(
+        matched_post=sent_match, reviewer_id=user.id, final_body="이미 보낸 답글",
+        action=ReplyAction.sent, external_reply_id="r-1",
+    )
+    # 소스 B: 같은 글이 재수집된 새 매칭(dedup 을 통과한다 — 소스가 다르므로)
+    src_b = await Source.create(
+        user=user, type=SourceType.threads, config={"query": "강아지", "sns_account_id": account.id}
+    )
+    dup_match = await MatchedPost.create(
+        source=src_b, external_post_id=external_id, content="본문", status=PostStatus.new
+    )
+    try:
+        r = await client.post(
+            f"/api/matches/{dup_match.id}/approve",
+            json={"final_body": "두 번째 답글", "sns_account_id": account.id}, headers=csrf,
+        )
+        assert r.status_code == 409
+        assert "이미 답글을 보냈습니다" in r.json()["detail"]
+        # 전송 호출이 없어야 한다(클레임 전에 걸러짐) + 상태·이력 불변
+        assert adapter.send_calls == 0
+        await dup_match.refresh_from_db()
+        assert dup_match.status == PostStatus.new
+        assert await ReplyActionLog.filter(matched_post_id=dup_match.id).count() == 0
+    finally:
+        await ReplyActionLog.filter(matched_post_id__in=[sent_match.id, dup_match.id]).delete()
+        await MatchedPost.filter(id__in=[sent_match.id, dup_match.id]).delete()
+        await Source.filter(id__in=[src_a.id, src_b.id]).delete()
+        await account.delete()
+
+
+async def test_approve_blocks_when_sibling_outcome_unknown(reviewer_session, monkeypatch):
+    """형제 매칭의 이력이 `unknown`(결과 불명)이어도 막는다 — 게시됐을 가능성을 배제할 수
+    없으므로 보내지 않는 쪽이 안전하다(설계 §2 fail-safe)."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter()
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    account = await _make_threads_account(user)
+    external_id = f"ext-unk-{uuid.uuid4().hex}"
+
+    src_a = await Source.create(
+        user=user, type=SourceType.threads, config={"query": "a", "sns_account_id": account.id}
+    )
+    unknown_match = await MatchedPost.create(
+        source=src_a, external_post_id=external_id, content="본문",
+        status=PostStatus.verify_pending,
+    )
+    await ReplyActionLog.create(
+        matched_post=unknown_match, reviewer_id=user.id, final_body="결과 불명 건",
+        action=ReplyAction.unknown, error="응답 유실",
+    )
+    src_b = await Source.create(
+        user=user, type=SourceType.threads, config={"query": "b", "sns_account_id": account.id}
+    )
+    dup_match = await MatchedPost.create(
+        source=src_b, external_post_id=external_id, content="본문", status=PostStatus.new
+    )
+    try:
+        r = await client.post(
+            f"/api/matches/{dup_match.id}/approve",
+            json={"final_body": "본문", "sns_account_id": account.id}, headers=csrf,
+        )
+        assert r.status_code == 409
+        assert adapter.send_calls == 0
+    finally:
+        await ReplyActionLog.filter(
+            matched_post_id__in=[unknown_match.id, dup_match.id]
+        ).delete()
+        await MatchedPost.filter(id__in=[unknown_match.id, dup_match.id]).delete()
+        await Source.filter(id__in=[src_a.id, src_b.id]).delete()
+        await account.delete()
+
+
+async def test_approve_allows_different_external_post(reviewer_session, monkeypatch):
+    """**다른 글**이면 같은 소스에 sent 이력이 있어도 정상 전송된다 — 가드가 과차단하지 않음."""
+    client, csrf, user = reviewer_session
+    adapter = FakeWriteAdapter()
+    monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.threads, adapter)
+    account = await _make_threads_account(user)
+
+    src = await Source.create(
+        user=user, type=SourceType.threads, config={"query": "간식", "sns_account_id": account.id}
+    )
+    sent_match = await MatchedPost.create(
+        source=src, external_post_id=f"ext-x-{uuid.uuid4().hex}", content="본문",
+        status=PostStatus.replied,
+    )
+    await ReplyActionLog.create(
+        matched_post=sent_match, reviewer_id=user.id, final_body="먼저 보낸 답글",
+        action=ReplyAction.sent, external_reply_id="r-x",
+    )
+    other_match = await MatchedPost.create(
+        source=src, external_post_id=f"ext-y-{uuid.uuid4().hex}", content="다른 글",
+        status=PostStatus.new,
+    )
+    try:
+        r = await client.post(
+            f"/api/matches/{other_match.id}/approve",
+            json={"final_body": "새 답글", "sns_account_id": account.id}, headers=csrf,
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["action"] == "sent"
+        assert adapter.send_calls == 1
+    finally:
+        await ReplyActionLog.filter(
+            matched_post_id__in=[sent_match.id, other_match.id]
+        ).delete()
+        await MatchedPost.filter(id__in=[sent_match.id, other_match.id]).delete()
+        await Source.filter(id=src.id).delete()
+        await account.delete()
