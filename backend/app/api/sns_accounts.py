@@ -69,6 +69,68 @@ def _validate_credentials(platform: Platform, credentials: dict[str, Any]) -> No
     # naver/community: 어댑터 미구현 — 스키마 확정 시(M3) 여기에 추가한다.
 
 
+async def _threads_profile(platform: Platform, credentials: dict[str, Any]) -> dict | None:
+    """threads 자격증명으로 안정 식별자(upsert 키)를 best-effort 확보한다(R10①).
+
+    **실패해도 등록/교체를 막지 않는다** — 무효 토큰은 이후 수집/전송 시점에 health
+    회계로 드러나는 것이 기존 설계이고(replace_credentials 참조), 업스트림 일시 장애로
+    계정 등록이 아예 불가해지는 편이 더 나쁘다. 식별자를 못 얻으면 예전처럼 NULL 로
+    저장되고, 다음 교체/재연동이 다시 채울 기회를 갖는다.
+    """
+    if platform != Platform.threads:
+        return None
+    from app.sources.threads import ProfileUnavailable, fetch_profile
+
+    token = credentials.get("access_token")
+    if not isinstance(token, str) or not token.strip():
+        return None  # 형식 검증이 이미 422 로 걸렀거나, threads 가 아닌 경로
+    try:
+        return await fetch_profile(token)
+    except ProfileUnavailable as exc:
+        # 토큰 값은 절대 로그에 싣지 않는다(불변식 ③) — 요약 메시지만.
+        logger.warning("threads 프로필 확보 실패 — 식별자 없이 저장한다: %s", exc)
+        return None
+
+
+async def _adopt_same_identity(
+    tx, *, user_id: int, profile: dict, ciphertext: str,
+    expires_at: datetime | None, display_name: str | None,
+) -> SnsAccount | None:
+    """같은 (사용자, Threads 신원) 계정이 있으면 자격증명·표시정보를 갱신하고 반환한다.
+
+    새 행을 만들지 않는 것이 핵심 — 소스 config 의 `sns_account_id` 참조가 유지된다
+    (R10①). upsert 키는 안정 식별자이며 username 은 매 연동 갱신만 한다(High-5).
+    호출자는 트랜잭션 안에서 쓴다.
+    """
+    # 같은 (사용자, 신원) 동시 연동 직렬화 — 행이 없을 때도 잠긴다(_identity_lock_key 참조)
+    await tx.execute_query(
+        "SELECT pg_advisory_xact_lock($1)", [_identity_lock_key(user_id, profile["user_id"])]
+    )
+    existing = (
+        await SnsAccount.filter(
+            user_id=user_id, platform=Platform.threads, platform_user_id=profile["user_id"]
+        )
+        .select_for_update()
+        .first()
+    )
+    if existing is None:
+        return None
+    if not await SnsAccountSecret.filter(account_id=existing.id).update(
+        encrypted_credentials=ciphertext
+    ):
+        # 결손 데이터(secret 없는 계정)도 여기서 복구한다
+        await SnsAccountSecret.create(account=existing, encrypted_credentials=ciphertext)
+    existing.status = AccountStatus.active
+    existing.token_expires_at = expires_at
+    existing.platform_username = profile["username"]
+    if display_name:
+        existing.display_name = display_name
+    await existing.save(
+        update_fields=["status", "token_expires_at", "platform_username", "display_name"]
+    )
+    return existing
+
+
 def _out(a: SnsAccount) -> SnsAccountOut:
     return SnsAccountOut(
         id=a.id, user_id=a.user_id, platform=a.platform, display_name=a.display_name,
@@ -101,12 +163,33 @@ async def create_account(
             status_code=503,
             detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
         ) from exc
-    async with in_transaction():
-        # 생성 주체에게 자동 귀속 — 타인 명의 계정 등록 경로는 없다.
-        account = await SnsAccount.create(
-            user=user, platform=body.platform, display_name=body.display_name
-        )
-        await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
+    # 등록 시점에 안정 식별자를 확보한다 — 이게 없으면 같은 Threads 계정을 OAuth 로
+    # 재연동할 때 upsert 키가 매칭되지 않아 별도 행이 생기고, 이 계정을 참조하던 소스
+    # config 가 고아가 된다(R10① 실측: 계정 26→31→32 로 증식, 소스 110·119 수집 중단).
+    profile = await _threads_profile(body.platform, body.credentials)
+    try:
+        async with in_transaction() as tx:
+            if profile is not None:
+                # 같은 신원 재등록이면 새 행 대신 자격증명 교체(소스 참조 보존).
+                # 수동 등록은 토큰 수명을 모르므로 만료 시각은 비운다(OAuth 경로와의 차이).
+                adopted = await _adopt_same_identity(
+                    tx, user_id=user.id, profile=profile, ciphertext=ciphertext,
+                    expires_at=None, display_name=body.display_name,
+                )
+                if adopted is not None:
+                    return _out(adopted)
+            # 생성 주체에게 자동 귀속 — 타인 명의 계정 등록 경로는 없다.
+            account = await SnsAccount.create(
+                user=user, platform=body.platform, display_name=body.display_name,
+                platform_username=(profile["username"] if profile else None),
+                platform_user_id=(profile["user_id"] if profile else None),
+            )
+            await SnsAccountSecret.create(account=account, encrypted_credentials=ciphertext)
+    except IntegrityError as exc:
+        # 부분 unique(신원) 백스톱 — 동시 등록 경합. 롤백으로 부분 반영 없음
+        raise HTTPException(
+            status_code=409, detail="계정 상태가 변경되었습니다 — 다시 시도해 주세요"
+        ) from exc
     return _out(account)
 
 
@@ -134,6 +217,9 @@ async def replace_credentials(
             status_code=503,
             detail="자격증명 암호화 키가 설정되지 않았거나 형식이 잘못되었습니다 — 서버 설정 필요",
         ) from exc
+    # 교체 토큰으로도 식별자를 확보한다 — platform_user_id 가 NULL 인 기존 계정(수동
+    # 등록분)이 여기서 채워져 이후 OAuth 재연동이 같은 행으로 수렴한다(R10① 자기 치유).
+    profile = await _threads_profile(account.platform, body.credentials)
     try:
         async with in_transaction():
             # 락 순서 정렬(3차 독립 리뷰 중요): 부모(sns_accounts) 행을 먼저 잠근다 —
@@ -153,7 +239,29 @@ async def replace_credentials(
                 )
             locked.status = AccountStatus.active
             locked.token_expires_at = None
-            await locked.save(update_fields=["status", "token_expires_at"])
+            fields = ["status", "token_expires_at"]
+            if profile is not None:
+                # 같은 신원이 이미 다른 계정에 붙어 있으면 여기서 중단한다 — 부분 unique
+                # 제약(uid_sns_accounts_identity)이 어차피 막지만, 409 로 무엇이 문제인지
+                # 알려주는 편이 IntegrityError 일반 메시지보다 낫다. admin 이 타인 계정을
+                # 교체할 수 있으므로 소유자 기준은 locked.user_id 다(요청자 아님).
+                clash = (
+                    await SnsAccount.filter(
+                        user_id=locked.user_id, platform=Platform.threads,
+                        platform_user_id=profile["user_id"],
+                    )
+                    .exclude(id=locked.id)
+                    .exists()
+                )
+                if clash:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="같은 Threads 계정이 이미 다른 항목에 연결돼 있습니다 — 그 항목에서 교체해 주세요",
+                    )
+                locked.platform_user_id = profile["user_id"]
+                locked.platform_username = profile["username"]
+                fields += ["platform_user_id", "platform_username"]
+            await locked.save(update_fields=fields)
     except IntegrityError as exc:
         # 동시 교체 경합의 잔여 창(부모 락 이후의 unique/FK 충돌) — 롤백으로 부분 반영 없음
         raise HTTPException(
@@ -304,40 +412,15 @@ async def threads_oauth_connect(
     platform_user_id = result["user_id"][:64]
     try:
         async with in_transaction() as tx:
-            # 같은 (사용자, 신원) 동시 연동 직렬화 — 행이 없을 때도 잠긴다(위 헬퍼 참조)
-            await tx.execute_query(
-                "SELECT pg_advisory_xact_lock($1)",
-                [_identity_lock_key(user.id, platform_user_id)],
-            )
-            # upsert 키는 안정 식별자(platform_user_id) — username 은 변경/탈취 가능이라
-            # 식별에 쓰지 않고 표시·판정용으로 매 연동 갱신만 한다(1차 적대 리뷰 High-5)
-            existing = (
-                await SnsAccount.filter(
-                    user_id=user.id,
-                    platform=Platform.threads,
-                    platform_user_id=platform_user_id,
-                )
-                .select_for_update()
-                .first()
+            # 같은 신원 재연동이면 새 행 대신 자격증명 교체 — 수동 등록 경로와 같은 헬퍼를
+            # 쓴다(두 경로가 같은 불변식을 지켜야 한다: 계정 id 보존 = 소스 참조 보존).
+            existing = await _adopt_same_identity(
+                tx, user_id=user.id,
+                profile={"user_id": platform_user_id, "username": username},
+                ciphertext=ciphertext, expires_at=expires_at,
+                display_name=body.display_name,
             )
             if existing is not None:
-                await SnsAccountSecret.filter(account_id=existing.id).update(
-                    encrypted_credentials=ciphertext
-                )
-                if not await SnsAccountSecret.filter(account_id=existing.id).exists():
-                    await SnsAccountSecret.create(
-                        account=existing, encrypted_credentials=ciphertext
-                    )
-                existing.status = AccountStatus.active
-                existing.token_expires_at = expires_at
-                existing.platform_username = username
-                if body.display_name:
-                    existing.display_name = body.display_name
-                await existing.save(
-                    update_fields=[
-                        "status", "token_expires_at", "platform_username", "display_name",
-                    ]
-                )
                 return _out(existing)
             account = await SnsAccount.create(
                 user=user,
