@@ -314,3 +314,168 @@ def test_httpx_logger_pinned_to_warning():
 
     assert logging.getLogger("httpx").level >= logging.WARNING
     assert logging.getLogger("httpcore").level >= logging.WARNING
+
+
+# ── R10①: 수동 토큰 등록/교체도 안정 식별자를 확보해야 OAuth 재연동이 같은 행으로 수렴 ──
+#
+# 실측 회귀(2026-08-11): 수동 등록 계정은 platform_user_id 가 NULL 이라 같은 Threads
+# 계정을 OAuth 로 연동하면 upsert 키가 매칭되지 않아 별도 행이 생겼다(계정 26→31→32).
+# 그때 옛 계정을 참조하던 소스 config 는 고아가 되어 조용히 수집이 멈춘다
+# (FetchError: config.sns_account_id 의 threads 계정을 찾을 수 없습니다 — 소스 110·119).
+
+MANUAL_TOKEN = "manual-access-token-1"
+
+
+def _mock_me(monkeypatch, *, user_id: str = "999", username: str = "manual_bot",
+             status: int = 200, network_error: bool = False):
+    """`/me` 만 응답하는 MockTransport — 수동 등록/교체 경로는 이 호출만 한다."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if network_error:
+            raise httpx.ConnectError("boom", request=request)
+        assert request.url.path == "/v1.0/me", f"예상 밖 호출: {request.url}"
+        if status != 200:
+            return httpx.Response(
+                status,
+                json={"error": {"code": 190, "message": "Invalid OAuth access token"}},
+            )
+        return httpx.Response(200, json={"id": user_id, "username": username})
+
+    monkeypatch.setattr(
+        threads, "_client",
+        lambda: httpx.AsyncClient(
+            base_url=threads._API, timeout=1.0, transport=httpx.MockTransport(handler)
+        ),
+    )
+    return calls
+
+
+async def _register_manual(client, csrf, *, display_name: str = "수동등록"):
+    return await client.post(
+        "/api/sns-accounts",
+        json={"platform": "threads", "display_name": display_name,
+              "credentials": {"access_token": MANUAL_TOKEN}},
+        headers=csrf,
+    )
+
+
+async def test_manual_register_stores_stable_identity(oauth_session, monkeypatch, caplog):
+    """수동 토큰 등록도 /me 로 안정 식별자를 확보해 저장한다 — 토큰은 어디에도 노출 없음."""
+    client, csrf, user = oauth_session
+    calls = _mock_me(monkeypatch)
+
+    with caplog.at_level(logging.INFO):
+        r = await _register_manual(client, csrf)
+    assert r.status_code == 201
+    assert MANUAL_TOKEN not in r.text and MANUAL_TOKEN not in caplog.text
+    assert calls[0].headers["Authorization"] == f"Bearer {MANUAL_TOKEN}"
+
+    account = await SnsAccount.get(id=r.json()["id"])
+    assert account.platform_user_id == "999"
+    assert account.platform_username == "manual_bot"
+    # 수동 등록은 토큰 수명을 모른다 — OAuth 경로와 달리 만료 시각은 비운다
+    assert account.token_expires_at is None
+
+
+async def test_manual_register_then_oauth_keeps_same_row(oauth_session, monkeypatch):
+    """**R10① 핵심 회귀**: 수동 등록 → 같은 계정 OAuth 연동 → 계정 행이 늘지 않고
+    id 가 보존된다(소스 config 의 sns_account_id 참조가 살아 있어야 한다)."""
+    from app.models import Source
+
+    client, csrf, user = oauth_session
+    _mock_me(monkeypatch)
+    manual = await _register_manual(client, csrf)
+    assert manual.status_code == 201
+    account_id = manual.json()["id"]
+
+    # 그 계정을 참조하는 소스 — 재연동 후에도 이 참조가 유효해야 한다
+    source = await Source.create(
+        user=user, type="threads", name="간식",
+        config={"query": "간식", "sns_account_id": account_id},
+    )
+
+    # 같은 Threads 신원(id=999)으로 OAuth 연동 — username 은 바뀌어 있어도 무관
+    _mock_transport(monkeypatch, username="renamed_after_oauth")
+    state = await _fresh_state(client)
+    r = await client.post(
+        "/api/sns-accounts/threads-oauth",
+        json={"code": "auth-code-r10", "state": state}, headers=csrf,
+    )
+    assert r.status_code == 201
+    assert r.json()["id"] == account_id, "새 계정 행이 생겼다 — R10① 재발"
+    assert await SnsAccount.filter(user_id=user.id, platform=Platform.threads).count() == 1
+
+    account = await SnsAccount.get(id=account_id)
+    assert account.platform_username == "renamed_after_oauth"  # 표시용은 갱신
+    assert account.token_expires_at is not None  # OAuth 는 수명을 안다
+    secret = await SnsAccountSecret.get(account_id=account_id)
+    assert crypto.decrypt_credentials(secret.encrypted_credentials) == {
+        "access_token": LONG_TOKEN
+    }
+    # 소스가 여전히 실재하는 계정을 가리킨다(고아 아님)
+    await source.refresh_from_db()
+    assert await SnsAccount.filter(id=source.config["sns_account_id"]).exists()
+    await source.delete()
+
+
+async def test_manual_register_survives_profile_failure(oauth_session, monkeypatch):
+    """/me 가 거부/장애여도 등록은 막지 않는다(best-effort) — 무효 토큰은 이후 수집·전송
+    시점의 health 회계로 드러나고, 업스트림 장애로 등록 자체가 불가한 편이 더 나쁘다."""
+    client, csrf, user = oauth_session
+    _mock_me(monkeypatch, status=400)
+    r = await _register_manual(client, csrf)
+    assert r.status_code == 201
+    assert (await SnsAccount.get(id=r.json()["id"])).platform_user_id is None
+
+    _mock_me(monkeypatch, network_error=True)
+    r2 = await _register_manual(client, csrf, display_name="두번째")
+    assert r2.status_code == 201
+    assert (await SnsAccount.get(id=r2.json()["id"])).platform_user_id is None
+
+
+async def test_credentials_replace_backfills_identity(oauth_session, monkeypatch):
+    """토큰 교체가 NULL 식별자를 채운다 — 기존 수동 등록 계정의 자기 치유 경로."""
+    client, csrf, user = oauth_session
+    legacy = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="옛 수동등록",
+        status=AccountStatus.expired,
+    )
+    await SnsAccountSecret.create(
+        account=legacy, encrypted_credentials=crypto.encrypt_credentials({"access_token": "old"})
+    )
+    _mock_me(monkeypatch, username="healed_bot")
+    r = await client.put(
+        f"/api/sns-accounts/{legacy.id}/credentials",
+        json={"credentials": {"access_token": MANUAL_TOKEN}}, headers=csrf,
+    )
+    assert r.status_code == 204
+    await legacy.refresh_from_db()
+    assert legacy.platform_user_id == "999" and legacy.platform_username == "healed_bot"
+    assert legacy.status == AccountStatus.active
+
+
+async def test_credentials_replace_identity_clash_409(oauth_session, monkeypatch):
+    """그 신원이 이미 다른 계정에 붙어 있으면 409 — 부분 unique 제약(IntegrityError)보다
+    무엇이 문제인지 알려준다. 잘못된 계정에 토큰을 몰아넣어 중복 신원을 만들지 않는다."""
+    client, csrf, user = oauth_session
+    owner = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="이미 연결됨",
+        platform_username="owner_bot", platform_user_id="999",
+    )
+    other = await SnsAccount.create(
+        user=user, platform=Platform.threads, display_name="다른 항목",
+    )
+    await SnsAccountSecret.create(
+        account=other, encrypted_credentials=crypto.encrypt_credentials({"access_token": "old"})
+    )
+    _mock_me(monkeypatch)  # id=999 → owner 와 충돌
+    r = await client.put(
+        f"/api/sns-accounts/{other.id}/credentials",
+        json={"credentials": {"access_token": MANUAL_TOKEN}}, headers=csrf,
+    )
+    assert r.status_code == 409
+    await other.refresh_from_db()
+    assert other.platform_user_id is None  # 롤백 — 부분 반영 없음
+    assert (await SnsAccount.get(id=owner.id)).platform_user_id == "999"

@@ -392,6 +392,42 @@ class OAuthUpstreamError(Exception):
     httpx 예외 문자열에는 URL(시크릿 쿼리 포함 가능)이 실리므로 절대 전달하지 않는다."""
 
 
+class ProfileUnavailable(Exception):
+    """액세스 토큰으로 프로필(안정 식별자)을 확보하지 못함. 메시지는 audit 안전 요약만."""
+
+
+async def fetch_profile(token: str) -> dict:
+    """액세스 토큰 → `{"user_id", "username"}`. **upsert 키(안정 식별자) 확보용.**
+
+    수동 토큰 등록/교체도 이 값을 저장해야 같은 Threads 신원의 OAuth 재연동이 새 계정
+    행을 만들지 않는다(R10①: 옛 계정을 참조하던 소스 config 가 고아가 되던 경로).
+    식별에 username 을 쓰지 않는 것은 변경/탈취 가능하기 때문이다(어댑터 1차 적대 리뷰
+    High-5) — 여기서도 안정 id 를 키로, username 은 표시·판정용으로만 반환한다.
+
+    토큰은 예외 메시지·로그에 절대 싣지 않는다(불변식 ③).
+    """
+    try:
+        async with _client() as client:
+            resp = await client.get(
+                "/me", params={"fields": "id,username"}, headers=_auth(token)
+            )
+    except httpx.HTTPError as exc:
+        # httpx 예외 문자열에는 URL 이 실릴 수 있어 타입명만 남긴다.
+        raise ProfileUnavailable(f"프로필 조회 실패: {type(exc).__name__}") from exc
+    if resp.status_code != 200:
+        raise ProfileUnavailable(f"프로필 조회 실패 — {_error_summary(resp)}")
+    try:
+        body = resp.json()
+    except Exception as exc:  # noqa: BLE001 - JSONDecodeError 포함
+        raise ProfileUnavailable("프로필 응답 형식 이상(비 JSON)") from exc
+    if not isinstance(body, dict):
+        raise ProfileUnavailable("프로필 응답 형식 이상(비 dict)")
+    user_id, username = body.get("id"), body.get("username")
+    if not user_id or not username:
+        raise ProfileUnavailable("프로필 응답에 id/username 없음")
+    return {"user_id": str(user_id)[:64], "username": str(username)[:255]}
+
+
 def _json_dict(resp: httpx.Response) -> dict:
     """200 응답의 JSON dict 파싱 — 비JSON/비dict 는 업스트림 이상으로 취급."""
     try:
