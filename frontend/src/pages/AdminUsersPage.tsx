@@ -85,7 +85,8 @@ function CreateUserForm() {
   );
 }
 
-function UserRow({ user }: { user: AdminUser }) {
+// 행/카드 두 표현이 같은 상태를 쓰도록 뮤테이션·에러를 훅으로 뺀다.
+function useUserActions(user: AdminUser) {
   const { user: me } = useAuth();
   const queryClient = useQueryClient();
   const [error, setError] = useState<string | null>(null);
@@ -109,6 +110,56 @@ function UserRow({ user }: { user: AdminUser }) {
     onSuccess: invalidate,
     onError: (err) => setError(describeApiError(err)),
   });
+
+  return { error, isSelf, patchMutation, deleteMutation };
+}
+
+function UserCard({ user }: { user: AdminUser }) {
+  const { error, isSelf, patchMutation, deleteMutation } = useUserActions(user);
+
+  return (
+    <Card className="flex flex-col gap-3">
+      <div className="min-w-0">
+        <p className="truncate font-medium text-gray-900">
+          {user.email}
+          {isSelf && (
+            <Badge tone="neutral" className="ml-2">
+              나
+            </Badge>
+          )}
+        </p>
+        <p className="text-xs text-gray-500">가입 {formatDateTime(user.created_at)}</p>
+      </div>
+      <Field label="역할">
+        <Select
+          value={user.role}
+          disabled={patchMutation.isPending}
+          onChange={(e) => patchMutation.mutate(e.target.value as Role)}
+        >
+          {ROLES.map((r) => (
+            <option key={r} value={r}>
+              {ROLE_LABEL[r]}
+            </option>
+          ))}
+        </Select>
+      </Field>
+      <Button
+        size="sm"
+        variant="danger"
+        className="self-start"
+        disabled={deleteMutation.isPending || isSelf}
+        title={isSelf ? "본인 계정은 삭제할 수 없습니다." : undefined}
+        onClick={() => deleteMutation.mutate()}
+      >
+        삭제
+      </Button>
+      {error && <p className="text-sm text-tone-danger">{error}</p>}
+    </Card>
+  );
+}
+
+function UserRow({ user }: { user: AdminUser }) {
+  const { error, isSelf, patchMutation, deleteMutation } = useUserActions(user);
 
   return (
     <>
@@ -176,28 +227,44 @@ export default function AdminUsersPage() {
       {isError && <p className="text-sm text-tone-danger">사용자 목록을 불러오지 못했습니다.</p>}
 
       {users && (
-        <Table>
-          <Thead>
-            <Tr>
-              <Th>이메일</Th>
-              <Th>역할</Th>
-              <Th>가입일</Th>
-              <Th />
-            </Tr>
-          </Thead>
-          <Tbody>
+        <>
+          {/* 모바일: 표 대신 카드 — 이메일이 길어 좁은 폭에서 가로 오버플로가 난다 */}
+          <div className="flex flex-col gap-3 md:hidden">
             {users.length === 0 && (
-              <Tr>
-                <Td colSpan={4} className="py-8 text-center text-gray-400">
-                  등록된 사용자가 없습니다.
-                </Td>
-              </Tr>
+              <Card className="py-8 text-center text-sm text-gray-400">
+                등록된 사용자가 없습니다.
+              </Card>
             )}
             {users.map((user) => (
-              <UserRow key={user.id} user={user} />
+              <UserCard key={user.id} user={user} />
             ))}
-          </Tbody>
-        </Table>
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <Thead>
+                <Tr>
+                  <Th>이메일</Th>
+                  <Th>역할</Th>
+                  <Th>가입일</Th>
+                  <Th />
+                </Tr>
+              </Thead>
+              <Tbody>
+                {users.length === 0 && (
+                  <Tr>
+                    <Td colSpan={4} className="py-8 text-center text-gray-400">
+                      등록된 사용자가 없습니다.
+                    </Td>
+                  </Tr>
+                )}
+                {users.map((user) => (
+                  <UserRow key={user.id} user={user} />
+                ))}
+              </Tbody>
+            </Table>
+          </div>
+        </>
       )}
     </section>
   );

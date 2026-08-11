@@ -225,13 +225,12 @@ function CreateSnsAccountForm() {
   );
 }
 
-function ReplaceCredentialsForm({
+// 토큰 교체 입력부 — 데스크톱은 표 하단 확장 행, 모바일은 카드 안쪽에 그대로 얹는다.
+function ReplaceCredentialsFields({
   account,
-  columnCount,
   onDone,
 }: {
   account: SnsAccount;
-  columnCount: number;
   onDone: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -270,36 +269,32 @@ function ReplaceCredentialsForm({
   }
 
   return (
-    <Tr>
-      <Td colSpan={columnCount} className="bg-gray-50">
-        <div className="flex flex-wrap items-end gap-3 py-2">
-          {isThreads ? (
-            <Field label="새 액세스 토큰">
-              <Input
-                type="password"
-                autoComplete="off"
-                placeholder="threads 액세스 토큰"
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-              />
-            </Field>
-          ) : (
-            <Field label="새 자격증명 (JSON)">
-              <Textarea rows={3} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
-            </Field>
-          )}
-          <div className="flex gap-2">
-            <Button size="sm" onClick={handleSubmit} disabled={mutation.isPending}>
-              {mutation.isPending ? "교체 중…" : "교체"}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={onDone} disabled={mutation.isPending}>
-              취소
-            </Button>
-          </div>
-          {error && <p className="text-sm text-tone-danger">{error}</p>}
-        </div>
-      </Td>
-    </Tr>
+    <div className="flex flex-wrap items-end gap-3 py-2">
+      {isThreads ? (
+        <Field label="새 액세스 토큰">
+          <Input
+            type="password"
+            autoComplete="off"
+            placeholder="threads 액세스 토큰"
+            value={accessToken}
+            onChange={(e) => setAccessToken(e.target.value)}
+          />
+        </Field>
+      ) : (
+        <Field label="새 자격증명 (JSON)">
+          <Textarea rows={3} value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+        </Field>
+      )}
+      <div className="flex gap-2">
+        <Button size="sm" onClick={handleSubmit} disabled={mutation.isPending}>
+          {mutation.isPending ? "교체 중…" : "교체"}
+        </Button>
+        <Button size="sm" variant="ghost" onClick={onDone} disabled={mutation.isPending}>
+          취소
+        </Button>
+      </div>
+      {error && <p className="text-sm text-tone-danger">{error}</p>}
+    </div>
   );
 }
 
@@ -344,82 +339,163 @@ export default function AdminSnsAccountsPage() {
       {isError && <p className="text-sm text-tone-danger">SNS 계정 목록을 불러오지 못했습니다.</p>}
 
       {accounts && (
-        <Table>
-          <Thead>
-            <Tr>
-              <Th>플랫폼</Th>
-              <Th>표시 이름</Th>
-              {isAdmin && <Th>소유자</Th>}
-              <Th>상태</Th>
-              <Th>토큰 만료</Th>
-              <Th />
-            </Tr>
-          </Thead>
-          <Tbody>
+        <>
+          {/* 모바일: 6열 표는 좁은 폭에서 가로 오버플로 — 계정당 카드 한 장으로 접는다 */}
+          <div className="flex flex-col gap-3 md:hidden">
             {accounts.length === 0 && (
-              <Tr>
-                <Td colSpan={columnCount} className="py-8 text-center text-gray-400">
-                  등록된 SNS 계정이 없습니다.
-                </Td>
-              </Tr>
+              <Card className="py-8 text-center text-sm text-gray-400">
+                등록된 SNS 계정이 없습니다.
+              </Card>
             )}
-            {accounts.map((account) => (
-              <Fragment key={account.id}>
-                <Tr className="hover:bg-gray-50">
-                  <Td>{SOURCE_TYPE_LABEL[account.platform] ?? account.platform}</Td>
-                  <Td>{account.display_name}</Td>
-                  {isAdmin && (
-                    <Td>
-                      {account.user_id === user?.id ? "나" : `사용자 #${account.user_id}`}
-                    </Td>
-                  )}
-                  <Td>
+            {accounts.map((account) => {
+              const canManage = !isAdmin || account.user_id === user?.id;
+              return (
+                <Card key={account.id} className="flex flex-col gap-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-gray-900">{account.display_name}</p>
+                      <p className="text-xs text-gray-500">
+                        {SOURCE_TYPE_LABEL[account.platform] ?? account.platform}
+                      </p>
+                    </div>
                     <Badge tone={account.status === "active" ? "success" : "warning"}>
                       {account.status}
                     </Badge>
-                  </Td>
-                  <Td>{formatDateTime(account.token_expires_at)}</Td>
-                  <Td>
-                    <div className="flex justify-end gap-2">
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        disabled={isAdmin && account.user_id !== user?.id}
-                        onClick={() =>
-                          setReplacingId((cur) => (cur === account.id ? null : account.id))
-                        }
-                      >
-                        토큰 교체
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="danger"
-                        disabled={deleteMutation.isPending || (isAdmin && account.user_id !== user?.id)}
-                        onClick={() => deleteMutation.mutate(account.id)}
-                      >
-                        삭제
-                      </Button>
+                  </div>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-sm">
+                    {isAdmin && (
+                      <>
+                        <dt className="text-gray-500">소유자</dt>
+                        <dd className="text-gray-700">
+                          {account.user_id === user?.id ? "나" : `사용자 #${account.user_id}`}
+                        </dd>
+                      </>
+                    )}
+                    <dt className="text-gray-500">토큰 만료</dt>
+                    <dd className="text-gray-700">{formatDateTime(account.token_expires_at)}</dd>
+                  </dl>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      className="flex-1"
+                      disabled={!canManage}
+                      onClick={() =>
+                        setReplacingId((cur) => (cur === account.id ? null : account.id))
+                      }
+                    >
+                      토큰 교체
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      className="flex-1"
+                      disabled={deleteMutation.isPending || !canManage}
+                      onClick={() => deleteMutation.mutate(account.id)}
+                    >
+                      삭제
+                    </Button>
+                  </div>
+                  {replacingId === account.id && (
+                    <div className="rounded-md bg-gray-50 px-3">
+                      <ReplaceCredentialsFields
+                        account={account}
+                        onDone={() => setReplacingId(null)}
+                      />
                     </div>
-                  </Td>
+                  )}
+                  {rowError?.id === account.id && (
+                    <p className="text-sm text-tone-danger">{rowError.message}</p>
+                  )}
+                </Card>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block">
+            <Table>
+              <Thead>
+                <Tr>
+                  <Th>플랫폼</Th>
+                  <Th>표시 이름</Th>
+                  {isAdmin && <Th>소유자</Th>}
+                  <Th>상태</Th>
+                  <Th>토큰 만료</Th>
+                  <Th />
                 </Tr>
-                {replacingId === account.id && (
-                  <ReplaceCredentialsForm
-                    account={account}
-                    columnCount={columnCount}
-                    onDone={() => setReplacingId(null)}
-                  />
-                )}
-                {rowError?.id === account.id && (
+              </Thead>
+              <Tbody>
+                {accounts.length === 0 && (
                   <Tr>
-                    <Td colSpan={columnCount} className="text-sm text-tone-danger">
-                      {rowError.message}
+                    <Td colSpan={columnCount} className="py-8 text-center text-gray-400">
+                      등록된 SNS 계정이 없습니다.
                     </Td>
                   </Tr>
                 )}
-              </Fragment>
-            ))}
-          </Tbody>
-        </Table>
+                {accounts.map((account) => (
+                  <Fragment key={account.id}>
+                    <Tr className="hover:bg-gray-50">
+                      <Td>{SOURCE_TYPE_LABEL[account.platform] ?? account.platform}</Td>
+                      <Td>{account.display_name}</Td>
+                      {isAdmin && (
+                        <Td>
+                          {account.user_id === user?.id ? "나" : `사용자 #${account.user_id}`}
+                        </Td>
+                      )}
+                      <Td>
+                        <Badge tone={account.status === "active" ? "success" : "warning"}>
+                          {account.status}
+                        </Badge>
+                      </Td>
+                      <Td>{formatDateTime(account.token_expires_at)}</Td>
+                      <Td>
+                        <div className="flex justify-end gap-2">
+                          <Button
+                            size="sm"
+                            variant="secondary"
+                            disabled={isAdmin && account.user_id !== user?.id}
+                            onClick={() =>
+                              setReplacingId((cur) => (cur === account.id ? null : account.id))
+                            }
+                          >
+                            토큰 교체
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="danger"
+                            disabled={
+                              deleteMutation.isPending || (isAdmin && account.user_id !== user?.id)
+                            }
+                            onClick={() => deleteMutation.mutate(account.id)}
+                          >
+                            삭제
+                          </Button>
+                        </div>
+                      </Td>
+                    </Tr>
+                    {replacingId === account.id && (
+                      <Tr>
+                        <Td colSpan={columnCount} className="bg-gray-50">
+                          <ReplaceCredentialsFields
+                            account={account}
+                            onDone={() => setReplacingId(null)}
+                          />
+                        </Td>
+                      </Tr>
+                    )}
+                    {rowError?.id === account.id && (
+                      <Tr>
+                        <Td colSpan={columnCount} className="text-sm text-tone-danger">
+                          {rowError.message}
+                        </Td>
+                      </Tr>
+                    )}
+                  </Fragment>
+                ))}
+              </Tbody>
+            </Table>
+          </div>
+        </>
       )}
     </section>
   );
