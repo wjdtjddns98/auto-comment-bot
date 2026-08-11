@@ -12,12 +12,6 @@ class Settings(BaseSettings):
     # 허용 값 고정: 오타(예: "production")로 dev 보안 설정이 조용히 적용되는 것 방지.
     app_env: Literal["dev", "prod"] = "dev"
 
-    # Notion 영구 자동 리포터. NOTION_TOKEN 이 비면 스케줄러가 잡을 등록 안 함.
-    notion_token: str = ""
-    git_repo_dir: str = "/repo"  # 컨테이너에 마운트된 저장소 루트(.git 포함)
-    notion_report_db: str = "915726bfb5154593b5def3ea1cacc813"
-    notion_scrum_db: str = "fe5c49f4a3fb40898ed983ab22e9e8e3"
-
     # Threads OAuth (앱 심사 — 동의 화면 기반 계정 연동). 비면 OAuth 경로 503.
     # secret 은 .env 로만 주입 — 코드/로그/응답에 노출 금지(불변식 ③).
     threads_app_id: str = ""

@@ -18,7 +18,6 @@ from app.api.sources import router as sources_router
 from app.api.templates import router as templates_router
 from app.config import settings
 from app.db import TORTOISE_ORM
-from app.integrations.notion import post_daily
 from app.models import Source
 
 scheduler = AsyncIOScheduler()
@@ -40,10 +39,6 @@ async def lifespan(app: FastAPI):
         for key in filter(None, settings.credentials_fernet_keys.split(",")):
             Fernet(key.strip())
     await Tortoise.init(config=TORTOISE_ORM)
-    # 영구 자동 데일리 리포터: NOTION_TOKEN 있을 때만 매일 18:03 등록.
-    if settings.notion_token:
-        scheduler.add_job(post_daily, "cron", hour=18, minute=3,
-                          id="daily_notion", replace_existing=True)
     # poller: 주기 수집 tick (FR-1). 소스별 poll_interval_sec 판정은 tick 안에서.
     if settings.poller_enabled:
         scheduler.add_job(poller.poll_tick, "interval",
