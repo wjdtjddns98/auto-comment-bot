@@ -1,8 +1,9 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { getKeywords, getMatches, getSources } from "../lib/apiClient";
-import type { MatchedPostStatus } from "../types/api";
+import type { MatchedPost, MatchedPostStatus } from "../types/api";
+import { BulkSendPanel, type BulkTarget } from "../components/BulkSendPanel";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
@@ -26,6 +27,11 @@ function ExternalLinkIcon() {
       <path d="M5 5a2 2 0 00-2 2v8a2 2 0 002 2h8a2 2 0 002-2v-3a1 1 0 10-2 0v3H5V7h3a1 1 0 000-2H5z" />
     </svg>
   );
+}
+
+// 일괄 선택 대상 — approve 가 허용되는 상태만(그 외는 서버가 409). verify_pending 은 조정 대기라 제외.
+function isActionable(match: MatchedPost): boolean {
+  return match.status === "new" || match.status === "reviewing";
 }
 
 const STATUS_OPTIONS: Array<{ value: MatchedPostStatus | "all"; label: string }> = [
@@ -87,9 +93,13 @@ function SourceHealthBar() {
 
 export default function DashboardPage() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [status, setStatus] = useState<MatchedPostStatus | "all">("all");
   const [sourceId, setSourceId] = useState<number | "all">("all");
   const [page, setPage] = useState(1);
+  // 선택은 현재 페이지 범위로만 유지한다 — 필터·페이지가 바뀌면 초기화해서
+  // 화면에 보이지 않는 매칭이 발송 대상에 남는 일을 막는다.
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
 
   const { data: sources } = useQuery({ queryKey: ["sources"], queryFn: getSources });
   const { data: keywords } = useQuery({ queryKey: ["keywords"], queryFn: getKeywords });
@@ -113,14 +123,42 @@ export default function DashboardPage() {
     ? Math.max(1, Math.ceil(matchesQuery.data.total / PAGE_SIZE))
     : 1;
 
+  const items = matchesQuery.data?.items ?? [];
+  const selectableIds = useMemo(() => items.filter(isActionable).map((m) => m.id), [items]);
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedSet.has(id));
+
+  const bulkTargets: BulkTarget[] = useMemo(
+    () =>
+      items
+        .filter((m) => selectedSet.has(m.id))
+        .map((match) => ({ match, source: sourceMap.get(match.source_id) })),
+    [items, selectedSet, sourceMap]
+  );
+
   function updateStatus(value: string) {
     setStatus(value === "all" ? "all" : (value as MatchedPostStatus));
     setPage(1);
+    setSelectedIds([]);
   }
 
   function updateSource(value: string) {
     setSourceId(value === "all" ? "all" : Number(value));
     setPage(1);
+    setSelectedIds([]);
+  }
+
+  function goToPage(next: number) {
+    setPage(next);
+    setSelectedIds([]);
+  }
+
+  function toggleOne(id: number) {
+    setSelectedIds((prev) => (prev.includes(id) ? prev.filter((v) => v !== id) : [...prev, id]));
+  }
+
+  function toggleAll() {
+    setSelectedIds(allSelected ? [] : selectableIds);
   }
 
   return (
@@ -169,6 +207,16 @@ export default function DashboardPage() {
           <Table>
             <Thead>
               <Tr>
+                <Th className="w-10">
+                  <input
+                    type="checkbox"
+                    className="h-4 w-4 cursor-pointer rounded border-gray-300 accent-brand-600"
+                    checked={allSelected}
+                    disabled={selectableIds.length === 0}
+                    onChange={toggleAll}
+                    aria-label="처리 가능한 매칭 전체 선택"
+                  />
+                </Th>
                 <Th>상태</Th>
                 <Th>소스</Th>
                 <Th>키워드</Th>
@@ -181,7 +229,7 @@ export default function DashboardPage() {
             <Tbody>
               {matchesQuery.data.items.length === 0 && (
                 <Tr>
-                  <Td colSpan={7} className="py-8 text-center text-gray-400">
+                  <Td colSpan={8} className="py-8 text-center text-gray-400">
                     조건에 맞는 매칭 글이 없습니다.
                   </Td>
                 </Tr>
@@ -192,12 +240,25 @@ export default function DashboardPage() {
                   m.matched_keyword_id != null ? keywordMap.get(m.matched_keyword_id) : undefined;
                 // RSS 본문은 피드 원문 HTML 이라 평문으로 정규화해 표시한다(목록·툴팁 동일).
                 const content = toPlainText(m.content);
+                const selectable = isActionable(m);
                 return (
                   <Tr
                     key={m.id}
                     className="cursor-pointer hover:bg-gray-50"
                     onClick={() => navigate(`/matches/${m.id}`)}
                   >
+                    {/* 체크박스 셀은 행 클릭(상세 이동)과 겹치므로 클릭 전파를 막는다. */}
+                    <Td onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 cursor-pointer rounded border-gray-300 accent-brand-600 disabled:cursor-not-allowed"
+                        checked={selectedSet.has(m.id)}
+                        disabled={!selectable}
+                        onChange={() => toggleOne(m.id)}
+                        title={selectable ? "일괄 발송 대상으로 선택" : "이미 처리됐거나 승인할 수 없는 상태입니다"}
+                        aria-label={`매칭 #${m.id} 선택`}
+                      />
+                    </Td>
                     <Td>
                       <Badge tone={STATUS_TONE[m.status]}>{STATUS_LABEL[m.status]}</Badge>
                     </Td>
@@ -244,7 +305,7 @@ export default function DashboardPage() {
               variant="secondary"
               size="sm"
               disabled={page <= 1}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              onClick={() => goToPage(Math.max(1, page - 1))}
             >
               이전
             </Button>
@@ -255,11 +316,19 @@ export default function DashboardPage() {
               variant="secondary"
               size="sm"
               disabled={page >= totalPages}
-              onClick={() => setPage((p) => p + 1)}
+              onClick={() => goToPage(page + 1)}
             >
               다음
             </Button>
           </div>
+
+          {bulkTargets.length > 0 && (
+            <BulkSendPanel
+              targets={bulkTargets}
+              onSettled={() => queryClient.invalidateQueries({ queryKey: ["matches"] })}
+              onClose={() => setSelectedIds([])}
+            />
+          )}
         </>
       )}
     </section>

@@ -151,8 +151,12 @@ function handleGetMatches(query: MockRequestOptions["query"]): MatchListResponse
   const start = (page - 1) * size;
   const paged = items.slice(start, start + size);
   // 목록은 요약만(최대 500자) — 전체 본문은 상세 API 에서. backend/app/api/matches.py 와 동일한 규칙.
+  // 항상 복사본을 만든다: approve/ignore 가 원본 객체를 in-place 로 변형하므로 같은 참조를 그대로
+  // 돌려주면 React Query 의 구조적 공유가 "변경 없음"으로 오판해, 목록 화면에 머문 채 상태가 바뀌는
+  // 경우(일괄 발송) 리렌더가 누락된다. 실서버는 매 요청 새 JSON 을 주므로 그쪽 동작에 맞춘다
+  // (소스 목록도 같은 이유로 복사본을 반환한다 — handleGetSources 주석 참조).
   const summarized = paged.map((m) =>
-    m.content.length > 500 ? { ...m, content: m.content.slice(0, 500) } : m
+    m.content.length > 500 ? { ...m, content: m.content.slice(0, 500) } : { ...m }
   );
   return { items: summarized, total };
 }
