@@ -22,7 +22,15 @@ from tortoise.transactions import in_transaction
 from app import crypto
 from app.api.deps import current_user, require_csrf
 from app.config import settings
-from app.models import AccountStatus, Platform, Role, SnsAccount, SnsAccountSecret, User
+from app.models import (
+    AccountStatus,
+    Platform,
+    Role,
+    SnsAccount,
+    SnsAccountSecret,
+    Source,
+    User,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -273,8 +281,36 @@ async def replace_credentials(
 async def delete_account(
     account_id: int, user: Annotated[User, Depends(current_user)]
 ) -> None:
-    # secret 은 FK cascade 로 함께 삭제된다. 타인 계정은 존재 여부도 노출하지 않는다(404).
-    if not await visible_accounts(user).filter(id=account_id).delete():
+    """계정 삭제 — **그 계정을 참조하는 소스가 있으면 409**(R15).
+
+    소스의 `config.sns_account_id` 는 JSON 필드라 FK 백스톱이 없다. 그래서 계정을 지우면
+    소스가 조용히 고아가 되고, `enabled=true` 인데 매 틱 `FetchError: config.sns_account_id
+    의 threads 계정을 찾을 수 없습니다` 만 남기며 수집이 멈춘다(2026-08-11 실측: 계정 26·31
+    삭제로 소스 110·119 가 이 상태였다). `sources` 에 원인 컬럼이 없어(R17) DB 로는 진단도
+    안 되므로, 삭제 시점에 막는 것이 가장 값싼 방어다.
+
+    비활성 소스도 참조로 센다 — 나중에 다시 켜면 같은 고아 상태가 되기 때문이다.
+    """
+    account = await visible_accounts(user).filter(id=account_id).first()
+    if account is None:
+        # 타인 계정은 존재 여부도 노출하지 않는다(404) — 기존 정책 유지
+        raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
+    # config 가 JSONB 라 ORM 필터 대신 파이썬에서 검사한다 — 소스 수는 폴링 예산 상한
+    # (계정당 7개, THREADS-APP-REVIEW §4)에 묶여 있어 전체 스캔이 무해하다.
+    referring = [
+        s.id
+        for s in await Source.all().only("id", "config")
+        if (s.config or {}).get("sns_account_id") == account_id
+    ]
+    if referring:
+        ids = ", ".join(str(i) for i in sorted(referring))
+        raise HTTPException(
+            status_code=409,
+            detail=f"이 계정을 사용하는 소스가 있어 삭제할 수 없습니다(소스 {ids})"
+            " — 소스를 먼저 삭제하거나 다른 계정으로 변경해 주세요",
+        )
+    # secret 은 FK cascade 로 함께 삭제된다.
+    if not await SnsAccount.filter(id=account_id).delete():
         raise HTTPException(status_code=404, detail="SNS 계정이 없습니다")
 
 
