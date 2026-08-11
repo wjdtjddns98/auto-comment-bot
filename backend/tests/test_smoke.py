@@ -6,6 +6,20 @@ CI 의 `test` 잡은 DB 없이 이걸 돌려 green 을 확보한다. DB 통합/�
 from app import models
 
 
+def test_app_main_imports():
+    """앱 임포트 스모크 — 삭제된 모듈 참조 잔재를 **유닛 잡에서** 잡는다(#84 재발 방지).
+
+    #81 이 `app/integrations/notion.py` 를 지웠는데 `main.py` 임포트가 남아 dev 가 red
+    였다. 그때 이 잡(DB 불필요, `pytest -m "not db"`)은 **pass** 였다 — notion 테스트도
+    함께 삭제돼 `app.main` 을 타는 경로가 없었기 때문이다. 그래서 실제로 앱을 임포트하는
+    pg 잡만 실패해 증상이 한쪽에만 드러났고 원인 파악이 늦어졌다.
+    (`import app.main` 은 lifespan 을 실행하지 않으므로 DB·네트워크가 필요 없다.)
+    """
+    import app.main  # noqa: F401 - 임포트 성공 자체가 검증 대상
+
+    assert app.main.app is not None
+
+
 def test_table_names():
     assert models.MatchedPost._meta.db_table == "matched_posts"
     assert models.SnsAccountSecret._meta.db_table == "sns_account_secrets"
