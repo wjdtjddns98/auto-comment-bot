@@ -13,6 +13,9 @@ import type {
   MatchedPost,
   MatchedPostStatus,
   PatchUserRequest,
+  RenderTemplateItem,
+  RenderTemplateRequest,
+  RenderTemplateResponse,
   ReplyAction,
   Source,
   SnsAccount,
@@ -252,6 +255,80 @@ function handleRetry(id: number, body: unknown): ApproveMatchResponse {
     throw new MockApiError(409, "재시도는 reviewing 상태에서만 가능합니다.");
   }
   return handleApprove(id, body);
+}
+
+// ---- 템플릿 렌더 미리보기 (일괄 발송용) ----
+
+// backend/app/templating.py 와 같은 규칙으로 치환한다. 문법이 갈리면 mock QA 가 실서버와
+// 다른 문구를 보여주게 되므로 토큰 정규식·허용 변수·에러 문구를 그대로 맞춘다.
+const RENDER_TOKEN_RE = /\{\{([^{}]*)\}\}/g;
+const RENDER_ALLOWED_VARS = ["author", "keyword", "url"] as const;
+
+class TemplateRenderError extends Error {}
+
+function renderTemplateBody(body: string, context: Record<string, string | null>): string {
+  const missing: string[] = [];
+  const unknown: string[] = [];
+  const rendered = body.replace(RENDER_TOKEN_RE, (_all, rawToken: string) => {
+    const raw = rawToken.trim();
+    if (raw.includes("|")) {
+      // 랜덤 변형: 빈 후보도 허용한다(예: "{{안녕하세요|}}" = 있거나 없거나).
+      const choices = raw.split("|").map((c) => c.trim());
+      return choices[Math.floor(Math.random() * choices.length)];
+    }
+    if (!RENDER_ALLOWED_VARS.includes(raw as (typeof RENDER_ALLOWED_VARS)[number])) {
+      unknown.push(raw);
+      return "";
+    }
+    const value = context[raw];
+    if (!value) {
+      missing.push(raw);
+      return "";
+    }
+    return value;
+  });
+  if (unknown.length) {
+    const names = [...new Set(unknown)].sort().join(", ");
+    throw new TemplateRenderError(
+      `알 수 없는 템플릿 변수: ${names} (사용 가능: ${RENDER_ALLOWED_VARS.join(", ")} · 변형은 {{a|b}} 형식)`
+    );
+  }
+  if (missing.length) {
+    const names = [...new Set(missing)].sort().join(", ");
+    throw new TemplateRenderError(`이 매칭에서 값을 얻을 수 없는 변수: ${names}`);
+  }
+  // 변형·치환으로 생긴 연속 공백만 정리한다(줄바꿈은 사람이 의도한 것이라 보존).
+  return rendered.replace(/[ \t]{2,}/g, " ").trim();
+}
+
+function handleRenderTemplate(body: unknown): RenderTemplateResponse {
+  requireUser();
+  const req = (body ?? {}) as Partial<RenderTemplateRequest>;
+  const template = templates.find((t) => t.id === req.template_id && t.enabled);
+  if (!template) throw new MockApiError(422, "template_id: 템플릿이 없거나 비활성입니다");
+  const matchIds = Array.isArray(req.match_ids) ? req.match_ids : [];
+  if (matchIds.length < 1 || matchIds.length > 200) {
+    throw new MockApiError(422, "match_ids: 1~200건이어야 합니다");
+  }
+  // items 는 요청 순서를 유지한다. 실패는 그 건만 body=null + error 로 표시한다.
+  const items: RenderTemplateItem[] = matchIds.map((matchId: number) => {
+    const post = matchedPosts.find((m) => m.id === matchId);
+    if (!post) return { match_id: matchId, body: null, error: "매칭이 없습니다" };
+    const keyword =
+      post.matched_keyword_id != null
+        ? keywords.find((k) => k.id === post.matched_keyword_id)?.pattern ?? null
+        : null;
+    try {
+      const context = { author: post.author, keyword, url: post.url };
+      return { match_id: matchId, body: renderTemplateBody(template.body, context), error: null };
+    } catch (err) {
+      if (err instanceof TemplateRenderError) {
+        return { match_id: matchId, body: null, error: err.message };
+      }
+      throw err;
+    }
+  });
+  return { items };
 }
 
 // ---- 소스 (admin) ----
@@ -682,6 +759,13 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
     method: "GET",
     pattern: /^\/api\/matches\/(?<id>\d+)$/,
     handler: (p) => handleGetMatchDetail(Number(p.id)),
+  },
+  // 고정 경로라 /matches/{id} 패턴보다 먼저 둘 필요는 없지만(id 는 \d+ 로만 매칭) 순서를
+  // 바꿔도 안전하도록 approve 앞에 둔다.
+  {
+    method: "POST",
+    pattern: /^\/api\/matches\/render-template$/,
+    handler: (_p, _q, body) => handleRenderTemplate(body),
   },
   {
     method: "POST",

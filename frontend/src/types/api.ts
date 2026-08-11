@@ -181,6 +181,25 @@ export type ApproveMatchResponse =
   | { action: "sent"; external_reply_id: string }
   | { action: "approved"; clipboard_body: string };
 
+// 일괄 발송용 문구 미리보기(docs/API-SPEC.md §매칭). 전송이 아니라 렌더만 한다 —
+// 사람이 결과를 확인하고 approve 를 눌러야 나간다.
+export interface RenderTemplateRequest {
+  template_id: number;
+  // 1~200건. 응답 items 는 이 순서를 유지한다.
+  match_ids: number[];
+}
+
+export interface RenderTemplateItem {
+  match_id: number;
+  // 렌더 실패 시 null — 그 건만 실패하고 나머지 미리보기는 그대로 온다.
+  body: string | null;
+  error: string | null;
+}
+
+export interface RenderTemplateResponse {
+  items: RenderTemplateItem[];
+}
+
 // --- 사용자 관리 (admin, PRD FR-19) ---
 // ⚠️ docs/API-SPEC.md 에 아직 없는 제안 계약(백엔드 미확정). /api/users 라우터가
 // 실제로 추가되면 이 타입·엔드포인트를 백엔드와 맞춰 확정할 것 — 임의 구현 아님, 확인 필요.

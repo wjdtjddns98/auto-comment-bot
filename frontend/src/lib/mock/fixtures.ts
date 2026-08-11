@@ -106,6 +106,16 @@ export const MOCK_TEMPLATES: Template[] = [
     body: "누띠 간식 계산기는 수의영양학 공식 기반으로 우리 아이 맞춤 급여량을 알려드려요. 프로필 링크에서 무료로 계산해보세요!",
     enabled: true,
   },
+  // 일괄 발송의 건별 렌더(POST /api/matches/render-template)를 mock QA 에서 실제로 확인하기 위한
+  // 템플릿. {{a|b}} 변형이 건마다 독립적으로 뽑혀 N건 동일 문구를 피하는 것이 이 기능의 목적이다.
+  {
+    id: 3,
+    name: "변형 템플릿 (건별 렌더)",
+    body:
+      "{{안녕하세요|반갑습니다|안녕하세요 :)}} {{author}}님! " +
+      "{{강아지|반려견}} 급여량은 누띠 간식 계산기로 {{바로|1분 만에}} 확인하실 수 있어요 🐾",
+    enabled: true,
+  },
 ];
 
 export const MOCK_SNS_ACCOUNTS: SnsAccount[] = [

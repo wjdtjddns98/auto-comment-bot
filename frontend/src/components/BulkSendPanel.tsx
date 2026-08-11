@@ -1,8 +1,14 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
-import { useQuery } from "@tanstack/react-query";
-import { ApiError, approveMatch, getSnsAccounts, getTemplates } from "../lib/apiClient";
-import type { MatchedPost, Source } from "../types/api";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import {
+  ApiError,
+  approveMatch,
+  getSnsAccounts,
+  getTemplates,
+  renderTemplate,
+} from "../lib/apiClient";
+import type { MatchedPost, RenderTemplateItem, Source } from "../types/api";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
 import { Card } from "./ui/Card";
@@ -16,13 +22,13 @@ export interface BulkTarget {
 }
 
 // 일괄 발송은 되돌릴 수 없다 — 아래 간격은 그 전제 위의 최소 안전장치다.
-// 전송(write) 소스는 실제 외부 게시라 건당 간격을 둔다: 동일 문구 연속 게시는 Threads 의 스팸
-// 자동 판정 대상이고, 소스별 rate-limit 준수 의무도 있다(CLAUDE.md 불변식 ④).
+// 전송(write) 소스는 실제 외부 게시라 건당 간격을 둔다: 소스별 rate-limit 준수 의무가 있고
+// (CLAUDE.md 불변식 ④), 짧은 시간에 몰아 보내는 것 자체가 스팸 신호다.
 const WRITE_SEND_INTERVAL_MS = 2000;
 // 수동 복사 소스는 외부 호출 없이 서버 DB 기록만 하므로 짧은 간격이면 충분하다.
 const COPY_INTERVAL_MS = 200;
 
-type BulkOutcome = "sent" | "approved" | "failed" | "skipped";
+type BulkOutcome = "sent" | "approved" | "failed" | "skipped" | "excluded";
 
 interface BulkResult {
   matchId: number;
@@ -30,6 +36,8 @@ interface BulkResult {
   outcome: BulkOutcome;
   message: string;
   url: string | null;
+  /** 승인(수동 복사) 건에 붙는 실제 문구 — 건별 렌더에서는 건마다 다르므로 결과에 담아둔다. */
+  body: string | null;
 }
 
 const OUTCOME_LABEL: Record<BulkOutcome, string> = {
@@ -37,6 +45,7 @@ const OUTCOME_LABEL: Record<BulkOutcome, string> = {
   approved: "승인(수동 복사)",
   failed: "실패",
   skipped: "미처리",
+  excluded: "제외",
 };
 
 const OUTCOME_TONE = {
@@ -44,7 +53,15 @@ const OUTCOME_TONE = {
   approved: "info",
   failed: "danger",
   skipped: "neutral",
+  excluded: "warning",
 } as const;
+
+/** 발송 대상 1건 — 확정된 문구를 가졌거나, 제외 사유를 가졌거나 둘 중 하나다. */
+interface ResolvedTarget {
+  target: BulkTarget;
+  body: string | null;
+  excludeReason: string | null;
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -83,6 +100,10 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
   const [templateId, setTemplateId] = useState<number | "">("");
   const [finalBody, setFinalBody] = useState("");
   const [snsAccountId, setSnsAccountId] = useState<number | "">("");
+  // 렌더 결과를 버리고 사람이 직접 쓴 공통 문구를 쓰는 모드. 템플릿을 다시 고르면 해제된다.
+  const [manualBody, setManualBody] = useState(false);
+  const [rendered, setRendered] = useState<RenderTemplateItem[] | null>(null);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [phase, setPhase] = useState<"form" | "confirm" | "running" | "done">("form");
   const [progress, setProgress] = useState(0);
   // 실행 시점의 대상 건수 스냅샷 — 실행 중/직후에 표 선택이 바뀌어도 진행률 분모가 흔들리면 안 된다.
@@ -122,27 +143,100 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
   const copyTargets = targets.length - writeTargets.length;
   // 전송 가능 소스는 현재 threads 뿐이므로(matchDisplay.WRITABLE_SOURCE_TYPES) 상한도 threads 기준.
   const hasWriteTarget = writeTargets.length > 0;
-  const overThreadsLimit = hasWriteTarget && finalBody.length > THREADS_BODY_LIMIT;
   const accountMissing = hasWriteTarget && snsAccountId === "";
-  const canSubmit = Boolean(finalBody.trim()) && !accountMissing && !overThreadsLimit;
 
   const writableAccounts = useMemo(
     () => (snsAccounts ?? []).filter((a) => a.platform === "threads"),
     [snsAccounts]
   );
 
+  const renderMutation = useMutation({
+    mutationFn: (ids: number[]) =>
+      renderTemplate({ template_id: templateId as number, match_ids: ids }),
+    onSuccess: (res) => {
+      setRendered(res.items);
+      setRenderError(null);
+    },
+    onError: (err) => {
+      setRendered(null);
+      setRenderError(describeBulkError(err));
+    },
+  });
+
+  // 서버가 건마다 변형을 독립적으로 뽑아 주므로(POST /api/matches/render-template) 같은 템플릿으로도
+  // 문구가 갈린다 — N건 동일 문구가 중복 콘텐츠로 스팸 판정되는 것을 줄이는 것이 목적이다.
+  // 템플릿이나 대상이 바뀌면 다시 요청한다. 직접 편집 모드에서는 사람이 쓴 문구가 우선이라 건너뛴다.
+  const renderRef = useRef(renderMutation.mutate);
+  renderRef.current = renderMutation.mutate;
+  useEffect(() => {
+    if (templateId === "" || manualBody) {
+      setRendered(null);
+      setRenderError(null);
+      return;
+    }
+    const ids = targetSignature ? targetSignature.split(",").map(Number) : [];
+    if (ids.length > 0) renderRef.current(ids);
+  }, [templateId, manualBody, targetSignature]);
+
+  const renderMode = templateId !== "" && !manualBody;
+  const renderedMap = useMemo(
+    () => new Map((rendered ?? []).map((item) => [item.match_id, item])),
+    [rendered]
+  );
+
+  // 문구 확정 + 제외 판정. 제외는 조용히 넘기지 않고 사유와 함께 화면·결과에 남긴다 —
+  // 렌더 오류(오타 변수 등)를 빈 문구로 게시하는 것이 훨씬 나쁘다.
+  const resolved: ResolvedTarget[] = useMemo(() => {
+    return targets.map((target) => {
+      const writable = target.source ? isWritableSourceType(target.source.type) : false;
+      let body: string | null = null;
+      let excludeReason: string | null = null;
+
+      if (renderMode) {
+        const item = renderedMap.get(target.match.id);
+        if (!item) excludeReason = "미리보기 없음 — 문구를 다시 만들어 주세요";
+        else if (item.error) excludeReason = item.error;
+        else if (!item.body?.trim()) excludeReason = "렌더 결과가 비어 있습니다";
+        else body = item.body;
+      } else if (finalBody.trim()) {
+        body = finalBody;
+      } else {
+        excludeReason = "답변 문구가 비어 있습니다";
+      }
+
+      // Threads 상한은 approve 가 검사하지만, 초과가 확실한 건을 보내 502 를 만들 이유가 없다.
+      if (body && writable && body.length > THREADS_BODY_LIMIT) {
+        excludeReason = `Threads 상한 초과(${body.length}/${THREADS_BODY_LIMIT}자)`;
+        body = null;
+      }
+      return { target, body, excludeReason };
+    });
+  }, [targets, renderMode, renderedMap, finalBody]);
+
+  const eligible = resolved.filter((r) => r.body !== null);
+  const excluded = resolved.filter((r) => r.body === null);
+  // 변형이 실제로 갈렸는지 — 갈리지 않으면 렌더를 써도 스팸 완화 효과가 없다.
+  const distinctBodies = new Set(eligible.map((r) => r.body)).size;
+  const canSubmit =
+    eligible.length > 0 && !accountMissing && !(renderMode && renderMutation.isPending);
+
   function handleTemplateChange(value: string) {
     const nextId = value === "" ? "" : Number(value);
     setTemplateId(nextId);
-    if (nextId !== "") {
-      const template = templates?.find((t) => t.id === nextId);
-      if (template) setFinalBody(template.body);
-    }
+    // 템플릿을 새로 고르는 것은 "서버 렌더를 쓰겠다"는 뜻이라 직접 편집 모드를 해제한다.
+    setManualBody(false);
   }
 
-  async function handleCopyBody() {
+  // 렌더 결과를 시드로 삼아 공통 문구를 사람이 직접 다듬는 경로(계약상 수정은 허용된다).
+  function handleManualEdit() {
+    const seed = eligible[0]?.body ?? "";
+    setFinalBody(seed);
+    setManualBody(true);
+  }
+
+  async function handleCopyBody(body: string) {
     try {
-      await navigator.clipboard.writeText(finalBody);
+      await navigator.clipboard.writeText(body);
       showToast("문구를 복사했습니다.", "success");
     } catch {
       showToast("복사에 실패했습니다.", "danger");
@@ -151,19 +245,28 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
 
   async function run() {
     // 실행 대상은 시작 시점으로 고정한다 — 처리 중 표에서 선택을 바꿔도 발송 대상은 변하지 않는다.
-    const batch = targets;
+    const batch = eligible;
+    const skippedUpfront = excluded.map((r) => ({
+      matchId: r.target.match.id,
+      sourceName: r.target.source ? getSourceDisplayName(r.target.source) : `#${r.target.match.source_id}`,
+      outcome: "excluded" as const,
+      message: r.excludeReason ?? "제외됨",
+      url: r.target.match.url,
+      body: null,
+    }));
     abortRef.current = false;
     setAborting(false);
     setPhase("running");
     setProgress(0);
     setBatchTotal(batch.length);
-    setResults([]);
+    setResults(skippedUpfront);
 
-    const collected: BulkResult[] = [];
+    const collected: BulkResult[] = [...skippedUpfront];
     let aborted = false;
 
     for (let i = 0; i < batch.length; i += 1) {
-      const { match, source } = batch[i];
+      const { target, body } = batch[i];
+      const { match, source } = target;
       const writable = source ? isWritableSourceType(source.type) : false;
       const sourceName = source ? getSourceDisplayName(source) : `#${match.source_id}`;
 
@@ -174,6 +277,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           outcome: "skipped",
           message: abortRef.current ? "사용자 중단" : "앞선 오류로 중단",
           url: match.url,
+          body: null,
         });
         continue;
       }
@@ -187,6 +291,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           outcome: "skipped",
           message: "사용자 중단",
           url: match.url,
+          body: null,
         });
         continue;
       }
@@ -194,7 +299,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
       try {
         const res = await approveMatch(match.id, {
           template_id: templateId === "" ? undefined : templateId,
-          final_body: finalBody,
+          final_body: body as string,
           // 수동 복사 소스에는 계정이 필요 없다 — 계약상 불필요한 값을 보내지 않는다.
           sns_account_id: writable && snsAccountId !== "" ? snsAccountId : undefined,
         });
@@ -202,8 +307,9 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           matchId: match.id,
           sourceName,
           outcome: res.action === "sent" ? "sent" : "approved",
-          message: res.action === "sent" ? `reply_id: ${res.external_reply_id}` : "클립보드 복사 대상",
+          message: res.action === "sent" ? `reply_id: ${res.external_reply_id}` : "수동 복사 대상",
           url: match.url,
+          body: res.action === "approved" ? res.clipboard_body : null,
         });
       } catch (err) {
         collected.push({
@@ -212,6 +318,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           outcome: "failed",
           message: describeBulkError(err),
           url: match.url,
+          body: null,
         });
         if (isAbortingError(err)) aborted = true;
       }
@@ -229,6 +336,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
   const approvedCount = results.filter((r) => r.outcome === "approved").length;
   const failedCount = results.filter((r) => r.outcome === "failed").length;
   const skippedCount = results.filter((r) => r.outcome === "skipped").length;
+  const excludedCount = results.filter((r) => r.outcome === "excluded").length;
 
   return (
     <Card className="sticky bottom-4 z-10 flex flex-col gap-4 border-brand-500 shadow-lg">
@@ -248,7 +356,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           <div className="flex flex-wrap gap-4">
             <Field label="템플릿">
               <Select value={templateId} onChange={(e) => handleTemplateChange(e.target.value)}>
-                <option value="">선택 안 함</option>
+                <option value="">선택 안 함 (직접 입력)</option>
                 {(templates ?? [])
                   .filter((t) => t.enabled)
                   .map((t) => (
@@ -278,31 +386,81 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
             )}
           </div>
 
-          <Field label="답변 문구 (선택한 전 건에 동일 적용)" htmlFor="bulk-final-body">
-            <Textarea
-              id="bulk-final-body"
-              rows={4}
-              value={finalBody}
-              onChange={(e) => setFinalBody(e.target.value)}
-              placeholder="선택한 매칭 전부에 같은 문구로 전송됩니다."
-            />
-            {hasWriteTarget && (
-              <p className={`text-xs ${overThreadsLimit ? "text-tone-danger" : "text-gray-400"}`}>
-                {finalBody.length}/{THREADS_BODY_LIMIT}자 (Threads 전송 상한 — 초과 시 전송이 실패합니다)
+          {renderMode ? (
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-medium text-gray-700">건별 문구</span>
+                {renderMutation.isPending && <span className="text-xs text-gray-500">만드는 중…</span>}
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={renderMutation.isPending}
+                  onClick={() => renderMutation.mutate(targets.map((t) => t.match.id))}
+                >
+                  문구 다시 뽑기
+                </Button>
+                <Button size="sm" variant="ghost" onClick={handleManualEdit}>
+                  직접 편집
+                </Button>
+              </div>
+              <p className="text-xs text-gray-500">
+                서버가 <code>{"{{a|b|c}}"}</code> 변형을 건마다 따로 뽑고{" "}
+                <code>{"{{author}}"}</code>·<code>{"{{keyword}}"}</code>·<code>{"{{url}}"}</code> 를
+                그 글의 값으로 채웁니다. 아래 미리보기가 실제로 전송될 문구입니다.
               </p>
-            )}
-          </Field>
+              {renderError && <p className="text-sm text-tone-danger">{renderError}</p>}
+              {eligible.length > 1 && distinctBodies === 1 && (
+                <p className="text-xs text-tone-warning">
+                  {eligible.length}건이 모두 같은 문구입니다 — 이 템플릿에 변형이 없습니다. 템플릿에{" "}
+                  <code>{"{{안녕하세요|반갑습니다}}"}</code> 같은 변형을 넣으면 건마다 갈립니다.
+                </p>
+              )}
+            </div>
+          ) : (
+            <Field label="답변 문구 (선택한 전 건에 동일 적용)" htmlFor="bulk-final-body">
+              <Textarea
+                id="bulk-final-body"
+                rows={4}
+                value={finalBody}
+                onChange={(e) => setFinalBody(e.target.value)}
+                placeholder="선택한 매칭 전부에 같은 문구로 전송됩니다."
+              />
+              {hasWriteTarget && (
+                <p
+                  className={`text-xs ${
+                    finalBody.length > THREADS_BODY_LIMIT ? "text-tone-danger" : "text-gray-400"
+                  }`}
+                >
+                  {finalBody.length}/{THREADS_BODY_LIMIT}자 (Threads 전송 상한 — 초과 시 전송이 실패합니다)
+                </p>
+              )}
+              {hasWriteTarget && targets.length > 1 && (
+                <p className="text-xs text-tone-warning">
+                  같은 문구를 여러 글에 연속 게시하면 플랫폼이 스팸으로 자동 판정할 수 있습니다.
+                  템플릿을 고르면 서버가 건마다 문구를 갈라 줍니다.
+                </p>
+              )}
+            </Field>
+          )}
 
-          {hasWriteTarget && (
-            <p className="text-xs text-tone-warning">
-              동일 문구를 여러 글에 연속 게시하면 플랫폼이 스팸으로 자동 판정할 수 있습니다. 건별로
-              문구를 조정하려면 매칭 상세에서 개별 승인하세요.
-            </p>
+          {excluded.length > 0 && (
+            <div className="rounded-md border border-tone-warning/40 bg-amber-50 p-3">
+              <p className="text-xs font-medium text-tone-warning">
+                제외 {excluded.length}건 — 발송하지 않습니다
+              </p>
+              <ul className="mt-1 flex flex-col gap-0.5 text-xs text-gray-700">
+                {excluded.map((r) => (
+                  <li key={r.target.match.id}>
+                    매칭 #{r.target.match.id} — {r.excludeReason}
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
 
           <div>
             <Button disabled={!canSubmit} onClick={() => setPhase("confirm")}>
-              일괄 발송 검토
+              일괄 발송 검토 ({eligible.length}건)
             </Button>
           </div>
         </>
@@ -313,24 +471,62 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           <div className="rounded-md border border-tone-danger/40 bg-red-50 p-3 text-sm text-gray-900">
             <p className="font-medium text-tone-danger">이 동작은 되돌릴 수 없습니다.</p>
             <ul className="mt-1 list-disc pl-5 text-sm text-gray-700">
-              {hasWriteTarget && (
+              {eligible.some((r) => r.target.source && isWritableSourceType(r.target.source.type)) && (
                 <li>
-                  <strong>{writeTargets.length}건</strong>이 지금 실제로 게시됩니다(취소·삭제 불가).
+                  <strong>
+                    {
+                      eligible.filter(
+                        (r) => r.target.source && isWritableSourceType(r.target.source.type)
+                      ).length
+                    }
+                    건
+                  </strong>
+                  이 지금 실제로 게시됩니다(취소·삭제 불가).
                 </li>
               )}
-              {copyTargets > 0 && (
-                <li>{copyTargets}건은 전송 없이 승인 처리되고 문구는 수동 복사용으로 제공됩니다.</li>
+              {eligible.some((r) => !(r.target.source && isWritableSourceType(r.target.source.type))) && (
+                <li>
+                  {
+                    eligible.filter(
+                      (r) => !(r.target.source && isWritableSourceType(r.target.source.type))
+                    ).length
+                  }
+                  건은 전송 없이 승인 처리되고 문구는 수동 복사용으로 제공됩니다.
+                </li>
               )}
+              {excluded.length > 0 && <li>제외 {excluded.length}건은 발송하지 않습니다.</li>}
               <li>건당 간격을 두고 순차 처리하며, 진행 중 중단할 수 있습니다.</li>
             </ul>
           </div>
-          <div className="rounded-md border border-gray-200 bg-gray-50 p-3">
-            <p className="text-xs font-medium text-gray-500">전송될 문구</p>
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-900">{finalBody}</p>
+
+          <div className="flex flex-col gap-2">
+            <p className="text-xs font-medium text-gray-500">
+              전송될 문구 {renderMode ? "(건별)" : "(전 건 동일)"}
+            </p>
+            <ul className="flex max-h-60 flex-col gap-2 overflow-y-auto">
+              {eligible.map((r) => (
+                <li
+                  key={r.target.match.id}
+                  className="rounded-md border border-gray-200 bg-gray-50 p-2 text-sm"
+                >
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                    <span>매칭 #{r.target.match.id}</span>
+                    <span>
+                      {r.target.source ? getSourceDisplayName(r.target.source) : `#${r.target.match.source_id}`}
+                    </span>
+                    {r.target.source && isWritableSourceType(r.target.source.type) && (
+                      <Badge tone="danger">전송</Badge>
+                    )}
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-gray-900">{r.body}</p>
+                </li>
+              ))}
+            </ul>
           </div>
+
           <div className="flex flex-wrap gap-2">
             <Button variant="danger" onClick={() => void run()}>
-              {hasWriteTarget ? `${targets.length}건 발송 실행` : `${targets.length}건 승인 실행`}
+              {hasWriteTarget ? `${eligible.length}건 발송 실행` : `${eligible.length}건 승인 실행`}
             </Button>
             <Button variant="secondary" onClick={() => setPhase("form")}>
               돌아가기
@@ -379,6 +575,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
             {approvedCount > 0 && <Badge tone="info">승인 {approvedCount}건</Badge>}
             {failedCount > 0 && <Badge tone="danger">실패 {failedCount}건</Badge>}
             {skippedCount > 0 && <Badge tone="neutral">미처리 {skippedCount}건</Badge>}
+            {excludedCount > 0 && <Badge tone="warning">제외 {excludedCount}건</Badge>}
           </div>
 
           <ul className="flex max-h-60 flex-col gap-1 overflow-y-auto text-sm">
@@ -400,16 +597,17 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
                     원문 ↗
                   </a>
                 )}
+                {/* 건별 렌더에서는 문구가 건마다 다르므로 복사도 건별이어야 한다. */}
+                {r.body && (
+                  <Button size="sm" variant="ghost" onClick={() => void handleCopyBody(r.body as string)}>
+                    문구 복사
+                  </Button>
+                )}
               </li>
             ))}
           </ul>
 
           <div className="flex flex-wrap gap-2">
-            {approvedCount > 0 && (
-              <Button size="sm" variant="secondary" onClick={() => void handleCopyBody()}>
-                문구 복사 (수동 전송용)
-              </Button>
-            )}
             <Button size="sm" onClick={onClose}>
               완료
             </Button>
