@@ -89,12 +89,18 @@ async def poll_source(source: Source) -> int:
         posts = await adapter.fetch(source, source.last_success_at)
         stored = await _store_matches(source, posts)
     except RateLimitedError as exc:
-        await _record_failure(source, retry_after_sec=exc.retry_after_sec, rate_limited=True)
+        await _record_failure(
+            source, retry_after_sec=exc.retry_after_sec, rate_limited=True,
+            error=_safe_source_error(exc),
+        )
         return 0
-    except Exception:
+    except Exception as exc:
         # fetch 실패(FetchError)든 저장 실패든 동일하게 회계한다 — 커서 미전진 + health 반영.
         logger.exception("소스 수집/저장 실패 source=%s", source.id)
-        await _record_failure(source, retry_after_sec=None, rate_limited=False)
+        await _record_failure(
+            source, retry_after_sec=None, rate_limited=False,
+            error=_safe_source_error(exc),
+        )
         return 0
 
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
@@ -118,16 +124,33 @@ async def poll_source(source: Source) -> int:
     # 수집 성공이 down 을 ok 로 되돌린다.
     if source.id not in _reconcile_failing and not _reconcile_fail_counts.get(source.id):
         ok_set = await Source.filter(id=source.id, backoff_until__isnull=True).update(
-            health_status=HealthStatus.ok
+            health_status=HealthStatus.ok, last_error=None, last_error_at=None
         )
         if ok_set:
             source.health_status = HealthStatus.ok
+            source.last_error = None
+            source.last_error_at = None
     return stored
+
+
+def _safe_source_error(exc: Exception) -> str:
+    """`sources.last_error` 저장용 요약(R17) — 예기치 못한 예외의 원문은 자격증명을 담을
+    수 있어 DB·API 로 내보내지 않는다(불변식 ③, `matches._safe_error` 와 같은 원칙).
+
+    어댑터가 던지는 예외(FetchError·RateLimitedError)의 메시지는 어댑터가 통제하는 안전
+    텍스트라는 계약이므로 그대로 쓴다 — 그게 진단에 실제로 쓰이는 정보다
+    (예: "config.sns_account_id 의 threads 계정을 찾을 수 없습니다").
+    """
+    from app.sources.base import FetchError
+
+    if isinstance(exc, (FetchError, RateLimitedError)):
+        return f"{type(exc).__name__}: {exc}"[:500]
+    return f"내부 오류: {type(exc).__name__}"[:500]
 
 
 async def _record_failure(
     source: Source, *, retry_after_sec: float | None, rate_limited: bool,
-    reconcile: bool = False,
+    reconcile: bool = False, error: str | None = None,
 ) -> None:
     counts = _reconcile_fail_counts if reconcile else _fail_counts
     count = counts.get(source.id, 0) + 1
@@ -139,6 +162,14 @@ async def _record_failure(
     source.health_status = (
         HealthStatus.down if effective >= _DOWN_AFTER_FAILURES else HealthStatus.degraded
     )
+    # 원인 요약은 health 와 같은 UPDATE 에 묶는다 — 배지와 이유가 따로 커밋돼 어긋나는
+    # 창을 만들지 않는다. `error=None`(호출자가 요약을 주지 않은 경로)이면 기존 값을
+    # 보존한다 — 직전 원인을 빈 값으로 덮어쓰는 것이 진단에 더 나쁘다.
+    save_fields = ["health_status"]
+    if error is not None:
+        source.last_error = error
+        source.last_error_at = _now()
+        save_fields += ["last_error", "last_error_at"]
     if rate_limited:
         # 429/403 지수 backoff (FR-4). 서버의 Retry-After 가 더 길면 그쪽을 존중.
         delay = min(_BACKOFF_BASE_SEC * 2 ** (count - 1), _BACKOFF_CAP_SEC)
@@ -159,14 +190,14 @@ async def _record_failure(
         ).update(backoff_until=candidate)
         if overwrote:
             source.backoff_until = candidate
-        await source.save(update_fields=["health_status"])
+        await source.save(update_fields=save_fields)
     else:
         # 일반 실패에는 backoff 를 걸지 않는다 — 만료된 backoff 가 API 에 계속 노출되지
         # 않게 정리하되, 다른 채널(poll↔reconcile interleave)이 fetch 대기 중 방금 건
         # **미래** backoff 를 이 stale 객체의 무조건 None 저장으로 지우지 않는다(R11
         # TOCTOU, 불변식 ④). 성공 경로(poll_source)의 재조회 가드와 같은 방향이되,
         # 만료분만 지우는 조건부 원자 update 라 재조회↔저장 사이 경쟁 창 자체가 없다.
-        await source.save(update_fields=["health_status"])
+        await source.save(update_fields=save_fields)
         await Source.filter(id=source.id, backoff_until__lte=_now()).update(backoff_until=None)
 
 

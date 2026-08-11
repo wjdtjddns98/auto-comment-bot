@@ -39,6 +39,10 @@ class SourceOut(BaseModel):
     last_success_at: datetime | None
     health_status: HealthStatus
     backoff_until: datetime | None
+    # 마지막 실패 원인 요약(R17) — degraded/down 배지의 "왜" 를 화면에서 볼 수 있게.
+    # 수집이 성공하면 서버가 비운다. 자격증명은 담기지 않는다(불변식 ③).
+    last_error: str | None
+    last_error_at: datetime | None
 
 
 def _clean_name(v: str | None) -> str | None:

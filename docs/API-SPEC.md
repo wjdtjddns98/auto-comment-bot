@@ -35,7 +35,18 @@ Req `{ "email": "...", "password": "..." }` → 200 + 세션쿠키 `{ "id", "ema
 ## 소스 (admin)
 
 ### `GET /api/sources`
-200 `[{ id, name, type, config, poll_interval_sec, enabled, last_success_at, health_status, backoff_until }]`
+200 `[{ id, name, type, config, poll_interval_sec, enabled, last_success_at, health_status, backoff_until, last_error, last_error_at }]`
+
+> **`last_error`·`last_error_at`(R17, 신규)**: 마지막 수집 실패 원인 요약과 시각. `health_status`
+> 가 `degraded`/`down` 일 때 **왜 그런지**를 화면에서 보여주기 위한 필드다(이전에는 원인이
+> 컨테이너 로그에만 있어 진단이 어려웠다). **수집이 성공하면 서버가 비운다**(null).
+> 어댑터가 통제하는 안전 요약만 담기고, 예기치 못한 예외는 `"내부 오류: <타입명>"` 으로
+> 축약된다 — 자격증명·토큰은 절대 담기지 않는다(불변식 ③).
+> FE 는 health 배지 hover/툴팁으로 노출하면 좋다([FE 공유]).
+>
+> 참고: `health_status` 는 **연속 실패 1~4회 = `degraded`, 5회 이상 = `down`** 이고,
+> 실패 카운터는 in-memory 라 **API 재기동 시 초기화**된다(재기동 후엔 `down` 이던 소스가
+> `degraded` 로 보일 수 있다). 빈 결과 수집은 실패가 아니라 정상 성공(`ok`)이다.
 
 ### `POST /api/sources`
 Req `{ name?: string(≤100), type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }` → 201 source.

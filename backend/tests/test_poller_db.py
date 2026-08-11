@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app import poller
+from app import sources as sources_registry
 from app.auth import hash_password
 from app.models import (
     HealthStatus,
@@ -336,3 +337,132 @@ async def test_poll_success_clears_already_expired_backoff(env):
     assert fresh.backoff_until is None  # 만료분 정리
     assert fresh.health_status == HealthStatus.ok  # health 회복
     assert source.backoff_until is None  # in-memory 정합
+
+
+# ── R17: 실패 원인을 DB 에 남긴다(진단성) ────────────────────────────────────────
+#
+# 실측(2026-08-11): 소스가 degraded/down 인데 **이유가 DB 에 없어** 컨테이너 로그를 봐야만
+# 원인(고아 계정 참조)을 알 수 있었다. 로그가 롤링되면 사라지고 화면에도 못 띄운다.
+
+
+class _BoomAdapter:
+    """FetchError 를 던지는 어댑터 — 어댑터 메시지는 안전 텍스트라는 계약."""
+
+    can_write = False
+
+    def __init__(self, message: str = "config.sns_account_id 의 threads 계정을 찾을 수 없습니다"):
+        self.message = message
+
+    async def fetch(self, source, since):
+        from app.sources.base import FetchError
+
+        raise FetchError(self.message)
+
+
+class _SecretLeakAdapter:
+    """예기치 못한 예외(어댑터가 통제하지 않는 메시지) — 원문이 DB 로 새면 안 된다."""
+
+    can_write = False
+
+    async def fetch(self, source, since):
+        raise RuntimeError("token=SECRET-abc123 로 요청 실패")
+
+
+async def test_poll_records_last_error_and_clears_on_success(api_client, monkeypatch):
+    """실패 시 원인 요약 저장 → 성공하면 비워진다."""
+    user = await User.create(
+        email=f"t-{uuid.uuid4().hex[:10]}@test.local",
+        password_hash=hash_password("pw-test-1234"), role=Role.admin,
+    )
+    source = await Source.create(
+        user=user, type=SourceType.community, config={"rss_url": "https://ex.am/feed"},
+        poll_interval_sec=60,
+    )
+    try:
+        monkeypatch.setattr(poller, "_fail_counts", {})
+        monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+        monkeypatch.setitem(
+            sources_registry._ADAPTERS, SourceType.community, _BoomAdapter()
+        )
+        await poller.poll_source(source)
+        await source.refresh_from_db()
+        assert source.health_status == HealthStatus.degraded
+        assert "FetchError" in source.last_error
+        assert "계정을 찾을 수 없습니다" in source.last_error  # 진단에 쓰이는 실제 정보
+        assert source.last_error_at is not None
+
+        # 수집이 성공하면 원인은 비워진다(배지 회복과 같은 UPDATE)
+        class _OkAdapter:
+            can_write = False
+
+            async def fetch(self, source, since):
+                return []
+
+        monkeypatch.setitem(sources_registry._ADAPTERS, SourceType.community, _OkAdapter())
+        poller.forget_source(source.id)
+        await poller.poll_source(source)
+        await source.refresh_from_db()
+        assert source.health_status == HealthStatus.ok
+        assert source.last_error is None and source.last_error_at is None
+    finally:
+        poller.forget_source(source.id)
+        await Source.filter(id=source.id).delete()
+        await user.delete()
+
+
+async def test_poll_last_error_never_leaks_unexpected_exception_text(
+    api_client, monkeypatch
+):
+    """예기치 못한 예외의 원문은 DB 에 담지 않는다 — 타입명만(불변식 ③)."""
+    user = await User.create(
+        email=f"t-{uuid.uuid4().hex[:10]}@test.local",
+        password_hash=hash_password("pw-test-1234"), role=Role.admin,
+    )
+    source = await Source.create(
+        user=user, type=SourceType.community, config={"rss_url": "https://ex.am/feed"},
+        poll_interval_sec=60,
+    )
+    try:
+        monkeypatch.setattr(poller, "_fail_counts", {})
+        monkeypatch.setattr(poller, "_reconcile_fail_counts", {})
+        monkeypatch.setitem(
+            sources_registry._ADAPTERS, SourceType.community, _SecretLeakAdapter()
+        )
+        await poller.poll_source(source)
+        await source.refresh_from_db()
+        assert source.last_error == "내부 오류: RuntimeError"
+        assert "SECRET-abc123" not in source.last_error
+        assert "token" not in source.last_error
+    finally:
+        poller.forget_source(source.id)
+        await Source.filter(id=source.id).delete()
+        await user.delete()
+
+
+async def test_sources_api_exposes_last_error(api_client, monkeypatch):
+    """GET /api/sources 가 원인을 함께 반환한다 — FE 배지 hover 용."""
+    user = await User.create(
+        email=f"t-{uuid.uuid4().hex[:10]}@test.local",
+        password_hash=hash_password("pw-test-1234"), role=Role.admin,
+    )
+    source = await Source.create(
+        user=user, type=SourceType.community, config={"rss_url": "https://ex.am/feed"},
+        poll_interval_sec=60,
+    )
+    try:
+        monkeypatch.setitem(
+            sources_registry._ADAPTERS, SourceType.community, _BoomAdapter("피드 응답 형식 이상")
+        )
+        await poller.poll_source(source)
+        await api_client.post(
+            "/api/auth/login", json={"email": user.email, "password": "pw-test-1234"}
+        )
+        r = await api_client.get("/api/sources")
+        assert r.status_code == 200
+        item = next(s for s in r.json() if s["id"] == source.id)
+        assert "피드 응답 형식 이상" in item["last_error"]
+        assert item["last_error_at"] is not None
+    finally:
+        poller.forget_source(source.id)
+        await Source.filter(id=source.id).delete()
+        await user.delete()
