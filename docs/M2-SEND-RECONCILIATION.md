@@ -264,12 +264,22 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       리뷰 Medium-1(기존 TOCTOU)은 R11 로 분리.
 
 - [ ] R10. **Threads OAuth 잔여**(2차 적대 리뷰, 2026-07-22 — 병합 수용 판정, 후속):
-      ① 수동 등록 계정(platform_user_id null)과 OAuth 재연동이 매칭되지 않아 계정 행이
-      갈라질 수 있음 — 수동 계정 정리/이관 UX 는 제품 결정 필요(2차 M3).
+      ① ~~수동 등록 계정(platform_user_id null)과 OAuth 재연동이 매칭되지 않아 계정 행이
+      갈라질 수 있음~~ → **완료(2026-08-11, PR #86)**. 실측으로 현실화된 사고였다: 계정이
+      26→31→32 로 증식하고, 옛 계정을 참조한 소스 110·119 가 고아가 되어 조용히 수집이
+      멈췄다(`FetchError: config.sns_account_id 의 threads 계정을 찾을 수 없습니다`).
+      처리 = **자격증명을 받는 모든 경로가 안정 식별자를 확보**한다 — 수동 등록(`POST`)과
+      토큰 교체(`PUT`)가 `threads.fetch_profile()` 로 `/me` 를 조회해 `platform_user_id` 를
+      채우고, 같은 신원이 이미 있으면 새 행 대신 자격증명 교체(계정 id 보존 = 소스 참조
+      보존, `_adopt_same_identity` 를 OAuth 콜백과 공유). username 을 식별에 쓰지 않는
+      High-5 결정은 유지. 프로필 조회 실패는 best-effort(등록을 막지 않음). 회귀 5건.
       ② `_raise_for_oauth_status` 가 3단계 공용이라 장기 전환·/me 의 401/403 이 "코드
       무효(400)"로 오분류될 여지(2차 L2, 실사용 가능성 낮음). ③ 테스트 공백: state
       위조 시 업스트림 0회·TTL 경계·2/3단계 RequestError·advisory lock 실동시성(2차 L3).
       ④ Dockerfile 이 --workers 1 을 암묵 보장 — in-memory state 의존 명시 검토(2차 L4).
+      ⑤ **기존 고아 데이터 정리 미완**: 소스 110·119 는 여전히 사라진 계정 26·31 을
+      참조한다(코드 수정은 재발 방지일 뿐 기존 행을 고치지 않는다). 비활성 상태라 폴링은
+      멈춰 있고, 화면에는 `down`/`degraded` 배지로 남는다.
 
 - [x] R11. **`_record_failure` 일반 실패의 무조건 `backoff_until=None` 저장**(R9 2차 리뷰
       Medium-1 — PR #63 이전부터 존재, 이번 범위 제외): poll↔reconcile 이 같은 루프에서
@@ -323,6 +333,34 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       경쟁으로 down 이 degraded 로 순간 역전될 수 있음(R9① 이전부터 존재).
       ③ backoff 원자 UPDATE 성공 후 health save 가 부분 실패(크래시/취소)하면 backoff 만
       반영되고 health 는 stale — 관측(배지) 오차이며 backoff(④) 자체는 정합. 우선순위 낮음.
+
+- [ ] R15. **계정 삭제가 참조 소스를 고아로 만든다**(2026-08-11 실측 — R10① 사고의 직접
+      방아쇠): `DELETE /api/sns-accounts/{id}` 는 그 계정을 `config.sns_account_id` 로
+      참조하는 소스가 있어도 그냥 지운다(FK 가 아니라 JSON 필드라 DB 백스톱이 없다).
+      결과는 조용한 수집 중단 — 소스는 `enabled=true` 인데 매 틱 `FetchError` 만 남기고,
+      `sources` 에 원인 컬럼이 없어(R17) DB 로는 진단이 안 된다. 수정안: 삭제 전 참조
+      소스 검사 → 409(참조 목록 안내) 또는 소스 비활성화 후 삭제 허용. 소스 config 가
+      JSON 이라 `config->>'sns_account_id'` 조회가 필요하다.
+
+- [ ] R16. **`external_post_id` 기준 중복 발송 방지 부재**(2026-08-11 실측): dedup 키가
+      `(source_id, external_post_id)` 라서 **같은 Threads 글이 다른 소스로 수집되면 새
+      매칭**이 되고, 이중 발송 방어(CAS + `reply_actions` 부분 unique)는 전부
+      `matched_post_id` 기준이라 막지 못한다. 즉 소스를 갈아타면 **이미 답글을 보낸 글에
+      또 보낼 수 있다**. 실측: 글 `18059745272708845` 이 매칭 104(소스 110, `replied`)와
+      5006(소스 121, `new`)에 동존 → 5006 을 `ignored` 로 수동 처리했다. 소스 삭제 시
+      발송 이력까지 지우도록 완화한 뒤(2026-08-11 제품 결정)에는 "전에 답했다"는 단서가
+      아예 남지 않으므로 사람이 알아챌 방법도 없다. 수정안: approve 전 같은
+      `external_post_id` 의 `sent` 이력 검사(경고 또는 차단) — 불변식 ① 범위(사람 승인)
+      안에서 리뷰어에게 보여주는 쪽이 자연스럽다.
+
+- [ ] R17. **`sources` 에 실패 원인 컬럼이 없다**(2026-08-11 운영 실측): `health_status`
+      가 `degraded`/`down` 이어도 **왜 실패했는지 DB 에는 없다** — 원인은 컨테이너 로그의
+      `소스 수집/저장 실패 source=N` 스택뿐이라, 로그가 롤링되면 사라지고 대시보드에도
+      띄울 수 없다. 실제로 소스 119 의 고아 참조를 찾는 데 이 때문에 시간이 걸렸다.
+      추가로 `_fail_counts` 가 in-memory 라 **API 재기동 시 카운터가 0 으로 초기화**되어
+      `down` 이던 소스가 `degraded` 로 보이는 것도 관측을 흐린다. 수정안: `last_error`
+      (요약 문자열, 자격증명 echo 금지 — 불변식 ③) + `last_error_at` 추가, FE 배지
+      hover 로 노출([FE 공유] 필요).
 
 ## 참고 문서
 
