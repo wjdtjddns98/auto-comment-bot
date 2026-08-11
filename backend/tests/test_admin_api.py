@@ -319,9 +319,15 @@ async def test_delete_source_cascades_collection(admin_session):
         await Source.filter(id=src["id"]).delete()
 
 
-async def test_delete_source_with_sent_history_409(admin_session):
-    """실발송 증거·조정 재료는 불가침(불변식 ②) — sent·unknown 이력 또는 전송 진행 중
-    매칭이 있으면 소스 삭제 409(부분 삭제 없음), enabled=false 비활성화가 정식 경로."""
+async def test_delete_source_in_flight_409_but_sent_history_deletable(admin_session):
+    """소스 삭제 보호 범위(제품 결정 2026-08-11):
+
+    - **전송 진행 중**(sending·verify_pending)은 409 — 감사가 아니라 정합성 보호다.
+      sending 은 결과 기록 대상이 사라지면 유령 전송이 되고, verify_pending 은 조정
+      판정 중이라 지우면 "게시됐는지 모름"이 영구 미해결로 남는다(설계 §3.6).
+    - **발송 이력(sent·unknown)만 있으면 삭제된다** — 이력 보존 목적의 409 는 제거됐다.
+      이력 확인은 운영 화면에서 하고, 소스 정리는 원클릭이어야 한다는 제품 결정.
+    """
     client, csrf = admin_session
     me = (await client.get("/api/auth/me")).json()
     src = (await client.post("/api/sources", json={"type": "community", "config": {"rss_url": "https://ex.am/feed"}}, headers=csrf)).json()
@@ -332,37 +338,43 @@ async def test_delete_source_with_sent_history_409(admin_session):
     ).json()
     post = await MatchedPost.create(
         source_id=src["id"], external_post_id=f"ext-{uuid.uuid4().hex}",
-        content="본문", status=PostStatus.replied,
+        content="본문", status=PostStatus.verify_pending,
     )
     await ReplyActionLog.create(
         matched_post=post, reviewer_id=me["id"], final_body="발송 본문",
         action=ReplyAction.sent, external_reply_id="r-live-1",
     )
+    cleanup_needed = True
     try:
+        # ① 전송 진행 중(verify_pending) → 409, 부분 삭제 없음(전부 생존)
         assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
-        # 보호 검사가 삭제보다 먼저라 아무것도 지워지지 않는다 — 전부 생존
         assert await MatchedPost.get_or_none(id=post.id) is not None
         assert await ReplyActionLog.filter(matched_post_id=post.id).count() == 1
         assert await Keyword.get_or_none(id=scoped_kw["id"]) is not None
 
-        # 전송 진행 중(verify_pending)도 동일 보호 — sent 이력 없이 상태만으로 차단
-        await ReplyActionLog.filter(matched_post_id=post.id).delete()
-        await MatchedPost.filter(id=post.id).update(status=PostStatus.verify_pending)
+        # sending 도 같은 보호
+        await MatchedPost.filter(id=post.id).update(status=PostStatus.sending)
         assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
 
-        # 조정 미게시 판정 후 reviewing 복귀 행(unknown 이력만 존재)도 보호(검증 리뷰
-        # High) — 미게시 판정은 오판일 수 있어(설계 §3.6) 애매한 전송 흔적은 지우지 않는다
-        await MatchedPost.filter(id=post.id).update(status=PostStatus.reviewing)
+        # ② 전송이 종결되면(replied) sent·unknown 이력이 있어도 삭제된다
+        await MatchedPost.filter(id=post.id).update(status=PostStatus.replied)
         await ReplyActionLog.create(
             matched_post=post, reviewer_id=me["id"], final_body="발송 본문",
             action=ReplyAction.unknown, error="결과 불명",
         )
-        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 409
+        assert (await client.delete(f"/api/sources/{src['id']}", headers=csrf)).status_code == 204
+        # 이력·매칭·스코프 키워드·소스가 모두 정리된다(명시 순서 삭제)
+        assert await ReplyActionLog.filter(matched_post_id=post.id).count() == 0
+        assert await MatchedPost.get_or_none(id=post.id) is None
+        assert await Keyword.get_or_none(id=scoped_kw["id"]) is None
+        assert await Source.get_or_none(id=src["id"]) is None
+        cleanup_needed = False
     finally:
-        await ReplyActionLog.filter(matched_post_id=post.id).delete()
-        await MatchedPost.filter(id=post.id).delete()
-        await Keyword.filter(id=scoped_kw["id"]).delete()
-        await Source.filter(id=src["id"]).delete()
+        if cleanup_needed:
+            await ReplyActionLog.filter(matched_post_id=post.id).delete()
+            await MatchedPost.filter(id=post.id).delete()
+            await Keyword.filter(id=scoped_kw["id"]).delete()
+            await Source.filter(id=src["id"]).delete()
 
 
 async def test_reply_action_fk_protections(admin_session):
