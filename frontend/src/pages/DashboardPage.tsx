@@ -13,6 +13,7 @@ import {
   formatDateTime,
   getSourceDisplayName,
   HEALTH_TONE,
+  sourceErrorTitle,
   STATUS_LABEL,
   STATUS_TONE,
   toPlainText,
@@ -83,6 +84,17 @@ function SourceHealthBar() {
           {isBackoffActive(source.backoff_until) && (
             <span className="text-xs text-tone-danger">
               backoff ~{formatDateTime(source.backoff_until)}
+            </span>
+          )}
+          {/* 실패 원인(R17): 배지만으로는 "폴링은 도는데 글이 없다"와 구분되지 않는다.
+              w-full 로 줄을 바꿔 카드 폭 안에서 잘라 보여주고, 전문은 title 로 준다.
+              성공하면 서버가 비우므로 존재 여부만 보면 된다(health 값 별도 판정 불필요). */}
+          {source.last_error && (
+            <span
+              className="w-full truncate text-xs text-gray-500"
+              title={sourceErrorTitle(source.last_error, source.last_error_at)}
+            >
+              마지막 실패: {source.last_error}
             </span>
           )}
         </Card>

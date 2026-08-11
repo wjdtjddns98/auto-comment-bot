@@ -127,3 +127,11 @@ export function formatDateTime(iso: string | null): string {
     minute: "2-digit",
   });
 }
+
+// health 배지 툴팁 문구(R17). 화면에는 잘린 한 줄만 보이므로 전문(최대 500자)과 발생
+// 시각은 title 로 노출한다. 원문을 가공하지 않는 이유: 백엔드가 넣는 요약
+// (`FetchError: HTTP 500`·`RateLimitedError: HTTP 429`·`내부 오류: <타입명>`)이 진단에
+// 실제로 쓰이는 값이라, FE 가 임의 매핑하면 새 실패 유형이 생길 때 조용히 어긋난다.
+export function sourceErrorTitle(error: string, at: string | null): string {
+  return at ? `${error}\n(발생: ${formatDateTime(at)})` : error;
+}
