@@ -44,6 +44,9 @@ export const MOCK_SOURCES: Source[] = [
     last_success_at: "2026-07-19T09:00:00Z",
     health_status: "ok",
     backoff_until: null,
+    // 수집 성공 소스는 서버가 원인을 비운다(R17) — 배지 옆 문구가 뜨지 않아야 정상.
+    last_error: null,
+    last_error_at: null,
   },
   {
     id: 2,
@@ -59,6 +62,9 @@ export const MOCK_SOURCES: Source[] = [
     // 조용히 무의미해진다. 항상 미래가 되도록 로드 시각 기준 상대값으로 둔다.
     health_status: "degraded",
     backoff_until: new Date(Date.now() + 30 * 60_000).toISOString(),
+    // 429 경로가 남기는 요약 형식(backend/app/poller.py _safe_source_error).
+    last_error: "RateLimitedError: HTTP 429",
+    last_error_at: new Date(Date.now() - 60_000).toISOString(),
   },
   {
     id: 3,
@@ -70,6 +76,13 @@ export const MOCK_SOURCES: Source[] = [
     last_success_at: null,
     health_status: "down",
     backoff_until: "2026-07-20T12:00:00Z",
+    // 500자 상한(백엔드가 잘라서 준다) 근처의 긴 요약 — 카드/표에서 잘리고 title 로만
+    // 전문이 보이는지 확인하는 픽스처.
+    last_error:
+      "FetchError: HTTP 500 — 업스트림이 반복적으로 5xx 를 반환합니다. "
+      + "피드 URL 이 유효한지, 게시판이 공개 상태인지 확인해 주세요. "
+      + "연속 실패 5회 이상이라 health 가 down 으로 내려갔습니다.",
+    last_error_at: "2026-07-20T11:58:00Z",
   },
   {
     id: 4,
@@ -84,6 +97,8 @@ export const MOCK_SOURCES: Source[] = [
     // **뜨지 않아야** 정상이다.
     health_status: "degraded",
     backoff_until: "2026-07-20T12:00:00Z",
+    last_error: "FetchError: RSS 파싱 실패: SAXParseException",
+    last_error_at: "2026-07-20T11:30:00Z",
   },
 ];
 

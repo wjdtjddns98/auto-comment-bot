@@ -11,6 +11,7 @@ import {
   getThreadsAccountId,
   getThreadsQuery,
   HEALTH_TONE,
+  sourceErrorTitle,
 } from "../lib/matchDisplay";
 import type { Source, SourceType } from "../types/api";
 import { Badge } from "../components/ui/Badge";
@@ -303,8 +304,22 @@ function SourceRow({ source }: { source: Source }) {
             `${source.poll_interval_sec}초`
           )}
         </Td>
-        <Td>
-          <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>{source.health_status}</Badge>
+        <Td className="whitespace-normal">
+          <div className="flex flex-col items-start gap-1">
+            <Badge tone={HEALTH_TONE[source.health_status] ?? "neutral"}>
+              {source.health_status}
+            </Badge>
+            {/* 실패 원인(R17) — 전문은 title. 소스 관리 화면이 설정을 고치는 곳이라
+                "무엇이 잘못됐는지"가 대시보드보다 여기서 더 필요하다. */}
+            {source.last_error && (
+              <span
+                className="block max-w-[16rem] truncate text-xs text-gray-500"
+                title={sourceErrorTitle(source.last_error, source.last_error_at)}
+              >
+                {source.last_error}
+              </span>
+            )}
+          </div>
         </Td>
         <Td>{formatDateTime(source.last_success_at)}</Td>
         <Td>

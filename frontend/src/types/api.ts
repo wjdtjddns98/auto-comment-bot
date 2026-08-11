@@ -33,6 +33,11 @@ export interface Source {
   last_success_at: string | null;
   health_status: string;
   backoff_until: string | null;
+  // 마지막 수집 실패 원인 요약과 시각(R17, docs/API-SPEC.md §소스). degraded/down 배지의
+  // "왜"를 화면에서 보여주기 위한 필드다. **수집이 성공하면 서버가 비운다**(null).
+  // 어댑터가 통제하는 안전 요약만 담긴다 — 자격증명은 포함되지 않는다(불변식 ③).
+  last_error: string | null;
+  last_error_at: string | null;
 }
 
 export interface CreateSourceRequest {

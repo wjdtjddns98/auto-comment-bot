@@ -362,6 +362,8 @@ function handleCreateSource(body: unknown): Source {
     last_success_at: null,
     health_status: "ok",
     backoff_until: null,
+    last_error: null,
+    last_error_at: null,
   };
   sources.push(record);
   return record;
