@@ -16,6 +16,8 @@ import type {
   PatchSourceRequest,
   PatchTemplateRequest,
   PatchUserRequest,
+  RenderTemplateRequest,
+  RenderTemplateResponse,
   ReplyAction,
   Source,
   SnsAccount,
@@ -93,8 +95,9 @@ interface RequestOptions {
   method?: string;
   body?: unknown;
   query?: Record<string, string | number | undefined>;
-  // /api/auth/login 전용: 로그인 전엔 세션 쿠키가 없어 /api/auth/csrf 가 401을 낸다
-  // (백엔드도 login 라우트엔 require_csrf 를 걸지 않음 — app/api/auth.py 참조).
+  // 서버가 require_csrf 를 걸지 않는 POST 에 쓴다. 두 곳뿐이다:
+  // - `/api/auth/login`: 로그인 전엔 세션 쿠키가 없어 `/api/auth/csrf` 가 401을 낸다(app/api/auth.py).
+  // - `/api/matches/render-template`: 상태를 바꾸지 않는 조회성 POST(app/api/matches.py).
   skipCsrf?: boolean;
 }
 
@@ -185,6 +188,13 @@ export const approveMatch = (id: number, body: ApproveMatchRequest) =>
   request<ApproveMatchResponse>(`/api/matches/${id}/approve`, { method: "POST", body });
 export const ignoreMatch = (id: number) =>
   request<void>(`/api/matches/${id}/ignore`, { method: "POST" });
+// 일괄 발송 문구 미리보기 — 전송하지 않는다. 조회성 POST 라 서버가 CSRF 를 요구하지 않는다.
+export const renderTemplate = (body: RenderTemplateRequest) =>
+  request<RenderTemplateResponse>("/api/matches/render-template", {
+    method: "POST",
+    body,
+    skipCsrf: true,
+  });
 // retry 는 body 없이 이전 시도를 재사용하지 않는다 — approve 와 동일한 요청 바디(final_body 필수)가 필요하다.
 export const retryMatch = (id: number, body: ApproveMatchRequest) =>
   request<ApproveMatchResponse>(`/api/matches/${id}/retry`, { method: "POST", body });
