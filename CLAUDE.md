@@ -40,7 +40,7 @@
 - **dev·prod 직접 push 금지** — `feat/*`·`fix/*` 브랜치 + PR + green CI 경유.
 - 하네스: `.claude/settings.json` PreToolUse 훅(`scripts/hooks/block-frozen-push.mjs`)이 **main/prod 직접
   push 를 도구 실행 전에 차단**한다(서버측 잠금·보호와 이중 방어). 우회 금지 — 막히면 dev 타깃 PR 로.
-- 커밋 전 로컬 게이트 green 필수 — **백엔드**: `ruff check .` + `pytest -q` / **프론트**: `npm run build`(tsc+vite).
+- 커밋 전 로컬 게이트 green 필수 — **백엔드**: `ruff check .` + `pytest -q` / **프론트**: `npm run build`(tsc+vite) + `npm test`(vitest).
 - Conventional commit + `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` 트레일러.
 
 ## 2. 백엔드 — 불변식(절대 위반 금지) *(백엔드 전용)*
@@ -59,7 +59,8 @@
 > 백엔드는 이 섹션을 채우거나 `frontend/**` 를 수정하지 않는다. 프론트 개발자가 관리한다.
 > (세분화 필요 시 `frontend/CLAUDE.md` 를 두면 그 디렉터리에서 자동 적용된다.)
 - 스택: React + TypeScript(Vite), 서버상태=TanStack Query(전역 스토어 YAGNI).
-- 게이트: `npm run build`(tsc --noEmit + vite build) green.
+- 게이트: `npm run build`(tsc --noEmit + vite build) + `npm test`(vitest run) 둘 다 green.
+  CI `프론트엔드 빌드 & 테스트` 잡이 두 개를 그대로 돌린다(PR #114) — 빌드만 통과시키고 올리면 CI 에서 잡힌다.
 - API 연동: `docs/API-SPEC.md` 계약에 맞춰 호출. approve 등 write 요청은 CSRF 토큰(`X-CSRF-Token`) 포함. 계약 변경 PR 은 양쪽 공유.
 
 ## 5. 절대 추측 금지
