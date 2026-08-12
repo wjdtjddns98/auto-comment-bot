@@ -46,7 +46,8 @@ export default function MatchDetailPage() {
     queryFn: () => getMatch(id),
     enabled: Number.isFinite(id),
   });
-  const { data: sources } = useQuery({ queryKey: ["sources"], queryFn: getSources });
+  const sourcesQuery = useQuery({ queryKey: ["sources"], queryFn: getSources });
+  const sources = sourcesQuery.data;
   const { data: templates } = useQuery({ queryKey: ["templates"], queryFn: getTemplates });
   const { data: snsAccounts } = useQuery({ queryKey: ["snsAccounts"], queryFn: getSnsAccounts });
 
@@ -85,6 +86,11 @@ export default function MatchDetailPage() {
     [sources, matchQuery.data?.source_id]
   );
   const writable = source ? isWritableSourceType(source.type) : false;
+  // 소스 목록을 못 받으면 source 가 undefined 라 전송 가능한 소스도 "전송 미지원"으로 보인다 —
+  // reviewer 가 /api/sources 에서 403 을 받던 동안(이슈 #104) threads 매칭이 실제로 그렇게 보였다.
+  // 백엔드가 읽기를 열어 그 원인은 사라졌지만, 5xx·네트워크 실패에도 같은 오표기가 나므로
+  // "확인 못 함"과 "미지원"을 화면에서 구분한다.
+  const sourceState = sourcesQuery.isPending ? "loading" : source ? "ready" : "unknown";
   const isThreads = source?.type === "threads";
   const overThreadsLimit = isThreads && finalBody.length > THREADS_BODY_LIMIT;
 
@@ -260,11 +266,16 @@ export default function MatchDetailPage() {
                 <p className="text-xs text-tone-danger">전송 가능한 소스는 SNS 계정 선택이 필수입니다.</p>
               )}
             </Field>
-          ) : (
+          ) : sourceState === "ready" ? (
             <p className="text-xs text-gray-500">
               이 소스는 자동 전송을 지원하지 않습니다. 승인 시 답변 문구를 클립보드 복사용으로 제공합니다.
             </p>
-          )}
+          ) : sourceState === "unknown" ? (
+            <p className="text-xs text-tone-warning">
+              소스 정보를 불러오지 못해 이 매칭의 전송 지원 여부를 확인할 수 없습니다. 새로고침 후에도
+              같으면 승인하지 말고 관리자에게 문의하세요.
+            </p>
+          ) : null}
 
           <div className="flex items-center gap-2">
             <Button
@@ -351,6 +362,15 @@ export default function MatchDetailPage() {
               </li>
             ))}
           </ul>
+        )}
+        {/* 전송중(sending) 전이 시각 — approve/retry 의 CAS 클레임이 찍는 값(#101 요청 2-a).
+            reply_actions 행으로는 남지 않아 이력만 봐선 "언제 전송을 걸었는지"가 안 보인다.
+            클레임이 풀린 뒤에도 마지막 시도 값이 남으므로 현재 상태(status)와 함께 읽어야 한다. */}
+        {match.sending_claimed_at && (
+          <p className="text-xs text-gray-500">
+            전송중 전이: {formatDateTime(match.sending_claimed_at)}
+            {match.status === "sending" ? " (처리 중)" : " (마지막 시도)"}
+          </p>
         )}
       </Card>
 

@@ -225,7 +225,9 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
     }
   }
 
+  // CAS 클레임(실서버 matches.py) — 클레임이 풀린 뒤에도 값은 남는다. 화면의 "전송중 전이" 표시 재현용.
   match.status = "sending";
+  match.sending_claimed_at = new Date().toISOString();
   const templateId = req.template_id ?? null;
 
   if (canWrite(match.source_id)) {
@@ -693,7 +695,17 @@ function handleUpdateSnsAccountCredentials(id: number, body: unknown): void {
 function handleGetReplyActions(query: MockRequestOptions["query"]): ReplyAction[] {
   requireUser();
   const matchId = query?.match_id ? Number(query.match_id) : undefined;
-  return replyActions.filter((r) => !matchId || r.matched_post_id === matchId);
+  // 실서버는 created_at desc 로 최신 limit 건만 준다(기본 200, 1~500 밖은 422) — 화면의 잘림
+  // 안내가 mock 에서도 같은 조건으로 뜨도록 정렬·상한을 맞춘다.
+  const limit = query?.limit === undefined ? 200 : Number(query.limit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new MockApiError(422, "limit 은 1~500 사이여야 합니다.");
+  }
+  return replyActions
+    .filter((r) => !matchId || r.matched_post_id === matchId)
+    .slice()
+    .sort((a, b) => (a.created_at === b.created_at ? b.id - a.id : a.created_at < b.created_at ? 1 : -1))
+    .slice(0, limit);
 }
 
 // ---- 사용자 관리 (admin, 제안 계약 — types/api.ts 주석 참조) ----

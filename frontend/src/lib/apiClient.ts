@@ -237,7 +237,9 @@ export const connectThreadsOAuth = (body: ThreadsOAuthConnectRequest) =>
   request<SnsAccount>("/api/sns-accounts/threads-oauth", { method: "POST", body });
 
 // --- 감사 로그 ---
-export const getReplyActions = (query?: { match_id?: number }) =>
+// append-only 테이블이라 서버가 전량을 주지 않는다 — `created_at desc` 최신 limit 건(기본 200,
+// 상한 500)만 온다(docs/API-SPEC.md §감사 로그). 화면은 잘림을 사용자에게 알려야 한다.
+export const getReplyActions = (query?: { match_id?: number; limit?: number }) =>
   request<ReplyAction[]>("/api/reply-actions", { query });
 
 // --- 사용자 관리 (admin, 제안 계약 — docs/API-SPEC.md 미확정, types/api.ts 주석 참조) ---
