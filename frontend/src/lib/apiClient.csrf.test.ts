@@ -234,3 +234,67 @@ describe("403 이 시차를 두고 도착하는 경우", () => {
     expect(issued).toBe(2);
   });
 });
+
+// 아래 두 테스트는 실제 백엔드 모델(토큰이 세션과 함께 고정)을 그대로 흉내낸다.
+describe("CSRF 가 아닌 403 을 구분한다", () => {
+  it("권한 부족 403 은 토큰이 그대로라 뮤테이션을 재전송하지 않는다", async () => {
+    let issued = 0;
+    let mutationCalls = 0;
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/auth/csrf") {
+        issued += 1;
+        // 세션이 그대로면 서버는 늘 같은 토큰을 준다(backend/app/api/auth.py).
+        return stubResponse(200, { csrf_token: "S1" }) as unknown as Response;
+      }
+      mutationCalls += 1;
+      // require_admin 이 내는 403 — CSRF 와 무관하다(backend/app/api/deps.py).
+      return stubResponse(403, { detail: "admin 권한이 필요합니다" }) as unknown as Response;
+    });
+
+    const api = await freshApiClient();
+    await expect(api.deleteSource(1)).rejects.toMatchObject({
+      name: "ApiError",
+      status: 403,
+      detail: "admin 권한이 필요합니다",
+    });
+
+    // 재전송 없음. 토큰이 안 바뀐 걸 확인했으니 재시도해도 같은 403 이다.
+    expect(mutationCalls).toBe(1);
+    // 최초 발급 1 + 토큰 변경 여부 확인 1.
+    expect(issued).toBe(2);
+  });
+
+  it("세션이 교체돼 토큰이 실제로 달라지면 1회 재시도해서 성공한다", async () => {
+    let issued = 0;
+    let sessionToken = "S1";
+    const mutationTokens: (string | undefined)[] = [];
+
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/auth/csrf") {
+        issued += 1;
+        return stubResponse(200, { csrf_token: sessionToken }) as unknown as Response;
+      }
+      const token = headerToken(init);
+      mutationTokens.push(token);
+      if (token !== sessionToken) {
+        return stubResponse(403, {
+          detail: "CSRF 토큰이 유효하지 않습니다",
+        }) as unknown as Response;
+      }
+      // `/api/matches/{id}/ignore` 는 204 를 준다(docs/API-SPEC.md).
+      return stubResponse(204, null) as unknown as Response;
+    });
+
+    const api = await freshApiClient();
+    await api.ignoreMatch(1); // S1 을 캐시에 올린다
+    sessionToken = "S2"; // 다른 탭에서 재로그인 → 쿠키 교체
+    await expect(api.ignoreMatch(2)).resolves.toBeUndefined();
+
+    // 구토큰으로 한 번 막히고, 재발급된 S2 로 재시도해 통과한다.
+    expect(mutationTokens).toEqual(["S1", "S1", "S2"]);
+    expect(issued).toBe(2);
+  });
+});
