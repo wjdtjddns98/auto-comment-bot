@@ -5,6 +5,12 @@
  * "동시에 여러 갈래가 몰려도 `/api/auth/csrf` 발급은 1회" 를 보장한다.
  * 403(토큰 만료) 재시도 경로와 발급 실패 후 복구 경로까지 함께 고정한다.
  *
+ * ⚠️ 서버 모델 주의 — 아래 스텁은 재발급마다 T1→T2 로 **다른** 토큰을 준다. 이건
+ * 클라이언트 단일비행 로직을 관찰하기 위한 것이고, 실제 백엔드는 그렇지 않다.
+ * CSRF 토큰은 Fernet 세션 페이로드 안에 들어 있어(backend/app/auth.py) `/api/auth/csrf`
+ * 는 매번 같은 값을 되돌려준다. 토큰이 바뀌는 유일한 경우는 세션 쿠키 자체가 교체될
+ * 때(다른 탭에서 재로그인)다. 즉 403 재시도가 실제로 구제하는 상황은 그 한 가지뿐이다.
+ *
  * 모듈 스코프 상태가 테스트 간에 새는 걸 막으려고, 매 테스트에서
  * `vi.resetModules()` + 동적 import 로 새 모듈 인스턴스를 받는다.
  */
@@ -24,10 +30,6 @@ function stubResponse(status: number, body: unknown): StubResponse {
     statusText: String(status),
     json: async () => body,
   };
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function headerToken(init?: RequestInit): string | undefined {
@@ -195,6 +197,12 @@ describe("403 이 시차를 두고 도착하는 경우", () => {
   it("재발급 완료 뒤에 뒤늦은 403 이 와도 갓 받은 토큰을 버리지 않는다", async () => {
     let issued = 0;
     let mutationSeq = 0;
+    // 시차를 wall-clock 타이머로 만들면 CI 부하에 따라 순서가 뒤집혀 flaky 해진다.
+    // 뒤늦은 갈래의 403 을 명시적 게이트로 붙잡아 순서를 결정론적으로 고정한다.
+    let releaseLate!: () => void;
+    const lateGate = new Promise<void>((resolve) => {
+      releaseLate = resolve;
+    });
 
     globalThis.fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -206,8 +214,7 @@ describe("403 이 시차를 두고 도착하는 경우", () => {
       if (token === "T1") {
         // 첫 갈래는 즉시 403, 두 번째 갈래는 재발급이 끝난 뒤에야 403 을 돌려준다.
         mutationSeq += 1;
-        const delay = mutationSeq === 1 ? 0 : 40;
-        await sleep(delay);
+        if (mutationSeq > 1) await lateGate;
         return stubResponse(403, { detail: "CSRF 토큰이 유효하지 않습니다." }) as unknown as Response;
       }
       // `/api/matches/{id}/ignore` 는 204 를 준다(docs/API-SPEC.md).
@@ -215,7 +222,12 @@ describe("403 이 시차를 두고 도착하는 경우", () => {
     });
 
     const api = await freshApiClient();
-    await Promise.all([api.ignoreMatch(1), api.ignoreMatch(2)]);
+    // 두 갈래가 같은 T1 을 공유한 채 출발한다(단일비행 성립).
+    const first = api.ignoreMatch(1);
+    const late = api.ignoreMatch(2);
+    await first; // 첫 갈래가 403 → 재발급(T2) → 재시도까지 끝낸다
+    releaseLate(); // 그 뒤에야 뒤늦은 403 이 도착한다
+    await late;
 
     // 뒤늦은 갈래는 자기가 보낸 T1 이 이미 캐시에서 밀려난 걸 보고 무효화를 건너뛴다.
     // 최초 1 + 첫 갈래 재발급 1 = 2. (조건 없이 비우면 3회가 된다 — 회귀 감지 지점)
