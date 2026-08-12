@@ -146,8 +146,12 @@ async function request<T>(
     credentials: "include",
   });
 
+  // 403 = CSRF 토큰 만료. 캐시를 비우고 1회만 재발급·재시도한다.
+  // 무효화는 "내가 보낸 토큰이 아직 캐시에 있을 때"로 한정한다 — 다른 갈래가 이미
+  // 재발급을 끝낸 뒤 뒤늦게 403 이 도착했는데 조건 없이 비우면, 갓 받아온 토큰을
+  // 버리고 불필요한 재발급이 갈래 수만큼 더 나간다(apiClient.csrf.test.ts 로 고정).
   if (res.status === 403 && isMutating && retryOn403) {
-    csrfToken = null;
+    if (headers["X-CSRF-Token"] === csrfToken) csrfToken = null;
     return request<T>(path, options, false);
   }
 
