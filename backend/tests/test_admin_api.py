@@ -649,25 +649,85 @@ async def test_sns_account_threads_requires_access_token(admin_session, monkeypa
     await client.delete(f"/api/sns-accounts/{r.json()['id']}", headers=csrf)
 
 
-# sns-accounts 는 셀프서비스(로그인 사용자 전체 허용)라 admin 전용 목록에서 제외
-ADMIN_PREFIXES = ["/api/sources", "/api/keywords", "/api/templates"]
+# 쓰기는 admin 전용, 읽기는 로그인 사용자 전체(이슈 #104). sns-accounts 는 셀프서비스.
+ADMIN_WRITE_PREFIXES = ["/api/sources", "/api/keywords", "/api/templates"]
 
 
 async def test_admin_routes_require_admin_and_csrf(api_client):
     # 미인증 → 401 (셀프서비스 포함 전부)
-    for prefix in [*ADMIN_PREFIXES, "/api/sns-accounts"]:
+    for prefix in [*ADMIN_WRITE_PREFIXES, "/api/sns-accounts"]:
         assert (await api_client.get(prefix)).status_code == 401
-    # reviewer → admin 라우터는 403, 셀프서비스는 200
+    # reviewer → 읽기는 200(#104), 셀프서비스도 200
     user = await _make_user(Role.reviewer)
     try:
         await api_client.post(
             "/api/auth/login", json={"email": user.email, "password": PASSWORD}
         )
-        for prefix in ADMIN_PREFIXES:
-            assert (await api_client.get(prefix)).status_code == 403
+        for prefix in ADMIN_WRITE_PREFIXES:
+            assert (await api_client.get(prefix)).status_code == 200, prefix
         assert (await api_client.get("/api/sns-accounts")).status_code == 200
     finally:
         await user.delete()
+
+
+async def test_reviewer_read_only_write_still_admin(api_client, admin_session):
+    """#104: reviewer 는 소스·키워드·템플릿을 **읽기만** 한다 — 쓰기는 전부 403.
+
+    라우터 레벨 가드를 내렸으므로 개별 write 라우트에 require_admin 이 실제로
+    붙어 있는지(POST/PATCH/DELETE 전부) 회귀로 고정한다.
+    """
+    # 주의: admin_session 은 같은 api_client 를 쓴다 — 아래에서 reviewer 로 로그인하면
+    # 세션 쿠키가 교체된다. 그래서 admin 준비를 먼저 끝내고, 정리는 픽스처 teardown
+    # (admin 유저 삭제 → 소스·키워드·템플릿 FK cascade)에 맡긴다.
+    admin_client, admin_csrf = admin_session
+    src = (await admin_client.post(
+        "/api/sources",
+        json={"type": "community", "config": {"rss_url": "https://ex.am/reviewer-feed"}},
+        headers=admin_csrf,
+    )).json()
+    kw = (await admin_client.post(
+        "/api/keywords", json={"pattern": "리뷰어테스트"}, headers=admin_csrf
+    )).json()
+    tpl = (await admin_client.post(
+        "/api/templates", json={"name": "t", "body": "본문"}, headers=admin_csrf
+    )).json()
+
+    reviewer = await _make_user(Role.reviewer)
+    try:
+        await api_client.post(
+            "/api/auth/login", json={"email": reviewer.email, "password": PASSWORD}
+        )
+        csrf = {"X-CSRF-Token": (await api_client.get("/api/auth/csrf")).json()["csrf_token"]}
+
+        # 읽기 — 방금 만든 리소스가 실제로 보인다(200 만이 아니라 내용까지)
+        assert any(s["id"] == src["id"] for s in (await api_client.get("/api/sources")).json())
+        assert any(k["id"] == kw["id"] for k in (await api_client.get("/api/keywords")).json())
+        assert any(
+            t["id"] == tpl["id"] for t in (await api_client.get("/api/templates")).json()
+        )
+
+        # 쓰기 — CSRF 는 유효한데도 403(권한). 생성·수정·삭제 전부.
+        writes = [
+            ("POST", "/api/sources", {"type": "community", "config": {"rss_url": "https://x.io/f"}}),
+            ("PATCH", f"/api/sources/{src['id']}", {"enabled": False}),
+            ("DELETE", f"/api/sources/{src['id']}", None),
+            ("POST", "/api/keywords", {"pattern": "몰래추가"}),
+            ("PATCH", f"/api/keywords/{kw['id']}", {"enabled": False}),
+            ("DELETE", f"/api/keywords/{kw['id']}", None),
+            ("POST", "/api/templates", {"name": "n", "body": "b"}),
+            ("PATCH", f"/api/templates/{tpl['id']}", {"enabled": False}),
+            ("DELETE", f"/api/templates/{tpl['id']}", None),
+        ]
+        for method, path, payload in writes:
+            r = await api_client.request(method, path, json=payload, headers=csrf)
+            assert r.status_code == 403, (method, path, r.status_code)
+            assert r.json()["detail"] == "admin 권한이 필요합니다"
+
+        # 실제로 아무것도 안 바뀌었다
+        assert (await Source.get(id=src["id"])).enabled is True
+        assert (await Keyword.get(id=kw["id"])).enabled is True
+    finally:
+        await reviewer.delete()
 
 
 async def test_sns_account_self_service_ownership(api_client, monkeypatch):

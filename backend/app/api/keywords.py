@@ -1,6 +1,8 @@
-"""/api/keywords — 키워드 CRUD (admin, API-SPEC §키워드).
+"""/api/keywords — 키워드 CRUD (읽기=로그인 사용자, 쓰기=admin, API-SPEC §키워드).
 
 regex 패턴은 저장 전 컴파일 검증(422). 매칭 자체는 poller(M1 후속)가 수행한다.
+읽기 개방 근거는 `sources.py` 상단 참조 — 승인 화면의 키워드 열이 reviewer 에게
+전부 `-` 로 뜨던 문제(이슈 #104).
 """
 import re
 from typing import Annotated
@@ -8,12 +10,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.deps import require_admin, require_csrf
+from app.api.deps import current_user, require_admin, require_csrf
 from app.api.schemas import PatchModel
 from app.models import Keyword, MatchType, Source, User
 
 router = APIRouter(
-    prefix="/api/keywords", tags=["keywords"], dependencies=[Depends(require_admin)]
+    prefix="/api/keywords", tags=["keywords"], dependencies=[Depends(current_user)]
 )
 
 
@@ -83,7 +85,9 @@ async def create_keyword(
     return _out(k)
 
 
-@router.patch("/{keyword_id}", dependencies=[Depends(require_csrf)])
+@router.patch(
+    "/{keyword_id}", dependencies=[Depends(require_admin), Depends(require_csrf)]
+)
 async def update_keyword(keyword_id: int, body: KeywordPatch) -> KeywordOut:
     k = await Keyword.get_or_none(id=keyword_id)
     if k is None:
@@ -101,7 +105,10 @@ async def update_keyword(keyword_id: int, body: KeywordPatch) -> KeywordOut:
     return _out(k)
 
 
-@router.delete("/{keyword_id}", status_code=204, dependencies=[Depends(require_csrf)])
+@router.delete(
+    "/{keyword_id}", status_code=204,
+    dependencies=[Depends(require_admin), Depends(require_csrf)],
+)
 async def delete_keyword(keyword_id: int) -> None:
     if not await Keyword.filter(id=keyword_id).delete():
         raise HTTPException(status_code=404, detail="키워드가 없습니다")
