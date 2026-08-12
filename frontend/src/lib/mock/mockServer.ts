@@ -203,6 +203,28 @@ function handleApprove(id: number, body: unknown): ApproveMatchResponse {
   const req = (body ?? {}) as ApproveMatchRequest;
   if (!req.final_body) throw new MockApiError(422, "final_body는 필수입니다.");
 
+  // 같은 게시물 중복 답글 차단(R16) — 같은 external_post_id 를 가진 **다른** 매칭에 sent·unknown
+  // 이력이 있으면 막는다. dedup 키가 (source_id, external_post_id) 라 같은 글이 다른 소스로
+  // 재수집되면 새 매칭이 되고, matched_post_id 단위 방어로는 두 번째 답글이 나간다.
+  // 전송 소스에만 적용된다(수동 복사 소스는 실제 게시가 아니므로 실서버도 검사하지 않는다).
+  if (canWrite(match.source_id)) {
+    const siblingIds = new Set(
+      matchedPosts
+        .filter((m) => m.id !== id && m.external_post_id === match.external_post_id)
+        .map((m) => m.id)
+    );
+    const alreadyReplied = replyActions.some(
+      (r) => siblingIds.has(r.matched_post_id) && (r.action === "sent" || r.action === "unknown")
+    );
+    if (alreadyReplied) {
+      throw new MockApiError(
+        409,
+        "이 게시물에는 이미 답글을 보냈습니다(다른 소스로 중복 수집된 글)" +
+          " — 중복 답글은 스팸으로 판정될 수 있어 차단합니다"
+      );
+    }
+  }
+
   match.status = "sending";
   const templateId = req.template_id ?? null;
 
@@ -546,6 +568,20 @@ function handleDeleteSnsAccount(id: number): void {
   // 본인 것만 삭제 가능(admin 은 전체) · 타인 것은 존재 여부 비노출로 404.
   if (idx === -1 || (user.role !== "admin" && snsAccounts[idx].user_id !== user.id)) {
     throw new MockApiError(404, "SNS 계정을 찾을 수 없습니다.");
+  }
+  // 참조 소스가 있으면 삭제 차단(R15) — 소스 config 는 JSON 이라 FK 백스톱이 없어, 이 검사가
+  // 없으면 계정 삭제가 소스를 조용히 고아로 만든다. **비활성 소스도 참조로 센다**(다시 켜면
+  // 같은 고아 상태가 되므로). 참조 소스 id 를 문구에 담는 것까지 실서버와 맞춘다.
+  const referring = sources
+    .filter((s) => (s.config as { sns_account_id?: number } | undefined)?.sns_account_id === id)
+    .map((s) => s.id)
+    .sort((a, b) => a - b);
+  if (referring.length > 0) {
+    throw new MockApiError(
+      409,
+      `이 계정을 사용하는 소스가 있어 삭제할 수 없습니다(소스 ${referring.join(", ")})` +
+        " — 소스를 먼저 삭제하거나 다른 계정으로 변경해 주세요"
+    );
   }
   snsAccounts.splice(idx, 1);
 }

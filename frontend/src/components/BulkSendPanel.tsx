@@ -8,6 +8,7 @@ import {
   getTemplates,
   renderTemplate,
 } from "../lib/apiClient";
+import { isDuplicateReplyConflict } from "../lib/errorMessage";
 import type { MatchedPost, RenderTemplateItem, Source } from "../types/api";
 import { Badge } from "./ui/Badge";
 import { Button } from "./ui/Button";
@@ -28,7 +29,7 @@ const WRITE_SEND_INTERVAL_MS = 2000;
 // 수동 복사 소스는 외부 호출 없이 서버 DB 기록만 하므로 짧은 간격이면 충분하다.
 const COPY_INTERVAL_MS = 200;
 
-type BulkOutcome = "sent" | "approved" | "failed" | "skipped" | "excluded";
+type BulkOutcome = "sent" | "approved" | "duplicate" | "failed" | "skipped" | "excluded";
 
 interface BulkResult {
   matchId: number;
@@ -43,6 +44,7 @@ interface BulkResult {
 const OUTCOME_LABEL: Record<BulkOutcome, string> = {
   sent: "전송 완료",
   approved: "승인(수동 복사)",
+  duplicate: "이미 답한 글",
   failed: "실패",
   skipped: "미처리",
   excluded: "제외",
@@ -51,6 +53,7 @@ const OUTCOME_LABEL: Record<BulkOutcome, string> = {
 const OUTCOME_TONE = {
   sent: "success",
   approved: "info",
+  duplicate: "warning",
   failed: "danger",
   skipped: "neutral",
   excluded: "warning",
@@ -69,12 +72,14 @@ function sleep(ms: number): Promise<void> {
 
 function describeBulkError(error: unknown): string {
   if (error instanceof ApiError) {
-    if (error.status === 409) return "이미 처리 중이거나 완료된 매칭";
+    // 409 는 상태 충돌·이미 전송됨·**같은 게시물 중복 답글 차단(R16)** 이 섞여 있다. 한 문구로
+    // 뭉치면 키워드가 겹치는 소스에서 가장 잘 터지는 R16 이 "상태 문제" 로 오인된다 — 서버가
+    // 이유를 문구에 담아 주므로 그대로 노출한다.
     if (error.status === 429) return "요청 한도 초과(429)";
     if (error.status === 403) return "권한 또는 CSRF 거부(403)";
     if (error.status === 502 && error.action === "unknown") return "결과 불명 — 자동 조정 대기";
     if (error.status === 502) return "전송 실패";
-    return error.detail;
+    return error.detail || "요청을 처리할 수 없습니다";
   }
   return "요청 처리 중 오류";
 }
@@ -315,7 +320,9 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
         collected.push({
           matchId: match.id,
           sourceName,
-          outcome: "failed",
+          // 중복 답글 차단(R16)은 "보내지 않는 것이 정답" 인 결과라 실패와 섞지 않는다 —
+          // 실패로 세면 운영자가 원인을 찾아 재시도할 대상으로 오해한다.
+          outcome: isDuplicateReplyConflict(err) ? "duplicate" : "failed",
           message: describeBulkError(err),
           url: match.url,
           body: null,
@@ -334,6 +341,7 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
 
   const sentCount = results.filter((r) => r.outcome === "sent").length;
   const approvedCount = results.filter((r) => r.outcome === "approved").length;
+  const duplicateCount = results.filter((r) => r.outcome === "duplicate").length;
   const failedCount = results.filter((r) => r.outcome === "failed").length;
   const skippedCount = results.filter((r) => r.outcome === "skipped").length;
   const excludedCount = results.filter((r) => r.outcome === "excluded").length;
@@ -573,10 +581,19 @@ export function BulkSendPanel({ targets, onSettled, onClose }: BulkSendPanelProp
           <div className="flex flex-wrap items-center gap-2 text-sm">
             {sentCount > 0 && <Badge tone="success">전송 {sentCount}건</Badge>}
             {approvedCount > 0 && <Badge tone="info">승인 {approvedCount}건</Badge>}
+            {duplicateCount > 0 && <Badge tone="warning">이미 답한 글 {duplicateCount}건</Badge>}
             {failedCount > 0 && <Badge tone="danger">실패 {failedCount}건</Badge>}
             {skippedCount > 0 && <Badge tone="neutral">미처리 {skippedCount}건</Badge>}
             {excludedCount > 0 && <Badge tone="warning">제외 {excludedCount}건</Badge>}
           </div>
+
+          {duplicateCount > 0 && (
+            <p className="text-xs text-tone-warning">
+              {duplicateCount}건은 같은 글이 다른 소스로도 수집돼 이미 답글이 나간 건입니다 —
+              중복 답글은 스팸으로 판정될 수 있어 서버가 막았습니다. 재시도 대상이 아니니 무시로
+              종료하세요.
+            </p>
+          )}
 
           <ul className="flex max-h-60 flex-col gap-1 overflow-y-auto text-sm">
             {results.map((r) => (
