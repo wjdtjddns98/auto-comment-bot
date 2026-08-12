@@ -72,7 +72,10 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 - **FR-11** 선점 성공 후 어댑터로 전송하고, 결과를 `reply_actions`에 기록: 성공 `sent`(+external_reply_id), 실패 `failed`(+error).
 - **FR-12** `reply_actions`는 matched_post당 `action='sent'` 최대 1건을 **DB partial unique index**로 강제한다. *(MUST-FIX #1)*
 - **FR-13** 전송 실패는 **자동 재시도하지 않는다**(스팸 방지). reviewer의 수동 재시도만 허용, 재시도는 새 `reply_actions` 행.
-- **FR-14** `sending`에 정체된 행(프로세스 crash 등)은 `sending_claimed_at` 기준 N분 초과 시 reconciliation sweep이 `reviewing`으로 되돌린다(또는 수동 reset). 외부 전송 멱등성: idempotency-key 지원 시 사용, 불가 시 **at-most-once(타임아웃=미전송 처리)** 정책 명시. *(MUST-FIX #4)*
+- **FR-14** 전송 결과 불명(unknown outcome) 처리 — 상세 설계는 `docs/M2-SEND-RECONCILIATION.md`. *(MUST-FIX #4, OQ-1 닫힘 2026-07-21: Threads idempotency-key 미지원 확정)*
+  - 확정 실패(게시 안 됐음이 보장)만 `reviewing` 복귀로 retry 를 연다. publish 단계의 타임아웃/응답유실/**5xx**는 **결과 불명** → `verify_pending` 전이(재전송 구조 차단, ignore 만 허용).
+  - **조정(reconciliation) 잡**이 대상 글의 답글을 read-only 조회해 실제 게시 여부를 판정: 발견 → `sent` 회계+`replied`, 미발견 상한 도달 → 미게시 판정+`reviewing`(retry 재개, "직접 확인 권장" 안내).
+  - `sending` 정체 행(프로세스 crash 등)은 sweep 이 회수하되, 전송 착수분(verify_meta 有)은 `verify_pending` 으로 — 죽은 클레임도 결과 불명이다.
 - **FR-15** `can_write=False` 소스는 전송 대신 클립보드 복사 문구를 제공하고 `reply_actions`에 `approved`만 기록.
 
 ### 감사 & 관측 (Audit & Observability)
@@ -122,7 +125,7 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 |---|---|---|
 | **M0** ✅ | 하네스 | `docker compose up`→`/health` 200 + DB 왕복 *(완료·검증됨)* |
 | **M1** | 모델7종·auth·수집·대시보드·승인 | 로그인→소스등록→매칭 대시보드 표시→승인→(mock)send→`reply_actions` sent 1건 audit, **e2e green** + 테스트게이트(아래) green |
-| **M2** | Threads write·견고성 | 429주입→`backoff_until`+`health='degraded'` 뱃지, **동시 approve 2건→send 1건** green, Threads 실발송→external_reply_id 기록 |
+| **M2** | Threads write·견고성 | 429주입→`backoff_until`+`health='degraded'` 뱃지, **동시 approve 2건→send 1건** green, Threads 실발송→external_reply_id 기록. **선결(승인 2차 리뷰 H-1)**: write 어댑터 착수 전 provider idempotency-key(OQ-1) 확보 또는 unknown-outcome(타임아웃 후 실제 게시 여부 불명) 조회·조정 절차 설계 — 타임아웃 취소는 외부 사이드이펙트 중단을 보장하지 않는다 |
 | **v1** | 운영화 | Caddy TLS 배포, pg_dump **off-host** 백업→신규 DB 복원 성공, admin/reviewer 권한매트릭스 green, 위협모델 문서 존재 |
 
 ### 테스트 게이트 5종 (M1 필수) *(MUST-FIX #7)*
@@ -147,7 +150,8 @@ SNS/커뮤니티에서 **사용자가 지정한 키워드가 포함된 게시글
 ---
 
 ## 10. Open Questions (개발 전 확인)
-- OQ-1. Threads/Graph API가 게시에 **idempotency-key**를 지원하는가? (FR-14 최선책 성립 여부 — M0/M1 조사)
+- ~~OQ-1. Threads/Graph API가 게시에 **idempotency-key**를 지원하는가? (FR-14 최선책 성립 여부 — M0/M1 조사)~~
+  **→ 닫힘(2026-07-21): 미지원.** unknown-outcome 조회·조정 절차로 대체 — 설계는 `docs/M2-SEND-RECONCILIATION.md` (M2 선결조건 이행).
 - OQ-2. Meta 앱 심사 리드타임/요건? (M2 write 일정에 영향)
 - OQ-3. 대상 네이버 카페의 RSS/검색 노출 범위(본문 접근 한계)?
 

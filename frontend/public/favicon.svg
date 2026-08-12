@@ -1,0 +1,13 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 배경: 둥근 사각형 (브랜드 blue-600) -->
+  <rect width="32" height="32" rx="7" fill="#2563eb"/>
+  <!-- 레이더 동심원 -->
+  <circle cx="16" cy="16" r="10.5" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.4"/>
+  <circle cx="16" cy="16" r="6.5" fill="none" stroke="#ffffff" stroke-width="1.5" opacity="0.7"/>
+  <!-- 스윕 -->
+  <path d="M16 16 L26 12.5 A10.5 10.5 0 0 1 25 21 Z" fill="#ffffff" opacity="0.2"/>
+  <line x1="16" y1="16" x2="26" y2="12.5" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round"/>
+  <!-- 중심 + 블립(키워드 탐지) -->
+  <circle cx="16" cy="16" r="1.8" fill="#ffffff"/>
+  <circle cx="21.5" cy="10.5" r="2.2" fill="#ffffff"/>
+</svg>

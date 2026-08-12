@@ -1,30 +1,68 @@
-import { useEffect, useState } from "react";
-
-// 하네스 확인용 페이지: 백엔드 /health 를 프록시로 호출해 풀스택 연결을 눈으로 검증한다.
-// 실제 대시보드/승인 UI 는 프론트 개발자가 M1 에서 구현한다(frontend/** 영역).
-type Health = { status: string; db: string };
+import { Navigate, Route, Routes } from "react-router-dom";
+import { Layout } from "./components/Layout";
+import { ProtectedRoute } from "./routes/ProtectedRoute";
+import { AdminRoute } from "./routes/AdminRoute";
+import LoginPage from "./pages/LoginPage";
+import DashboardPage from "./pages/DashboardPage";
+import MatchDetailPage from "./pages/MatchDetailPage";
+import AdminSourcesPage from "./pages/AdminSourcesPage";
+import AdminKeywordsPage from "./pages/AdminKeywordsPage";
+import AdminTemplatesPage from "./pages/AdminTemplatesPage";
+import AdminSnsAccountsPage from "./pages/AdminSnsAccountsPage";
+import AdminUsersPage from "./pages/AdminUsersPage";
+import AuditLogPage from "./pages/AuditLogPage";
+import DebugHealthPage from "./pages/DebugHealthPage";
 
 export default function App() {
-  const [health, setHealth] = useState<Health | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    fetch("/health")
-      .then((r) => r.json())
-      .then(setHealth)
-      .catch((e) => setError(String(e)));
-  }, []);
-
   return (
-    <main style={{ fontFamily: "system-ui", padding: 24 }}>
-      <h1>SNS 키워드 모니터</h1>
-      <p>백엔드 헬스체크:</p>
-      {error && <pre style={{ color: "crimson" }}>{error}</pre>}
-      {health ? (
-        <pre>{JSON.stringify(health, null, 2)}</pre>
-      ) : (
-        !error && <p>확인 중…</p>
-      )}
-    </main>
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route
+        element={
+          <ProtectedRoute>
+            <Layout />
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/matches/:id" element={<MatchDetailPage />} />
+        <Route
+          path="/admin/sources"
+          element={
+            <AdminRoute>
+              <AdminSourcesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/keywords"
+          element={
+            <AdminRoute>
+              <AdminKeywordsPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/templates"
+          element={
+            <AdminRoute>
+              <AdminTemplatesPage />
+            </AdminRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
+            </AdminRoute>
+          }
+        />
+        <Route path="/sns-accounts" element={<AdminSnsAccountsPage />} />
+        <Route path="/audit-log" element={<AuditLogPage />} />
+        <Route path="/debug/health" element={<DebugHealthPage />} />
+      </Route>
+      <Route path="*" element={<Navigate to="/" replace />} />
+    </Routes>
   );
 }

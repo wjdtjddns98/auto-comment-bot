@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<!-- nutti.co.kr/threads-callback.html 업로드용 — Threads OAuth redirect URI 대상 페이지.
+     동의 완료 시 ?code=...&state=... 로 리다이렉트되면 연동 값을 표시하고, 운영자가
+     대시보드 계정 연동 폼에 붙여넣는다(수동 운반 — 백엔드 공개 배포 없이 동작).
+     보안: 쿼리 파라미터는 신뢰불가 입력 — DOM 삽입은 전부 textContent 로만(XSS 차단,
+     OAuth 1차 적대 리뷰 Critical-1). innerHTML 에 파라미터를 절대 연결하지 말 것. -->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Threads 계정 연동 — Nutti</title>
+  <style>
+    body { font-family: -apple-system, "Malgun Gothic", sans-serif; max-width: 640px;
+           margin: 60px auto; padding: 0 20px; line-height: 1.7; color: #222; }
+    h1 { font-size: 1.3rem; }
+    code#code-box { display: block; padding: 14px; background: #f4f4f4; border-radius: 8px;
+           word-break: break-all; font-size: .95rem; margin: 16px 0; }
+    button { padding: 10px 18px; border: 0; border-radius: 8px; background: #F4803D;
+           color: #fff; font-size: 1rem; cursor: pointer; }
+    .error { color: #c0392b; }
+    .ok { color: #1e824c; }
+  </style>
+</head>
+<body>
+  <h1>Threads 계정 연동</h1>
+  <div id="content"></div>
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search);
+      var el = document.getElementById('content');
+
+      function showError(text) {
+        var msg = document.createElement('p');
+        msg.className = 'error';
+        msg.textContent = text;  // 신뢰불가 값 — textContent 만 사용(XSS 차단)
+        el.replaceChildren(msg);
+      }
+
+      if (p.get('error')) {
+        showError('연동이 취소되었거나 실패했습니다 (' +
+          (p.get('error_description') || p.get('error')) +
+          '). 대시보드에서 다시 시도해 주세요.');
+        return;
+      }
+      var code = p.get('code');
+      var state = p.get('state');
+      if (!code || !state) {
+        showError('연동 값이 없습니다. 대시보드의 "Threads로 연결" 버튼으로 다시 시작해 주세요.');
+        return;
+      }
+      // 대시보드가 한 번에 파싱할 수 있게 code+state 를 묶어 복사한다
+      var payload = 'code=' + encodeURIComponent(code) + '&state=' + encodeURIComponent(state);
+
+      var info = document.createElement('p');
+      info.innerHTML = '승인이 완료되었습니다. 아래 <strong>연동 값</strong>을 통째로 복사해 ' +
+        '대시보드의 SNS 계정 연동 화면에 붙여넣어 주세요. <em>값은 일회용이며 곧 만료됩니다.</em>';
+      var box = document.createElement('code');
+      box.id = 'code-box';
+      box.textContent = payload;
+      var btn = document.createElement('button');
+      btn.textContent = '연동 값 복사';
+      var done = document.createElement('span');
+      btn.addEventListener('click', function () {
+        navigator.clipboard.writeText(payload).then(function () {
+          done.textContent = ' 복사됨!';
+          done.className = 'ok';
+        });
+      });
+      el.replaceChildren(info, box, btn, done);
+    })();
+  </script>
+</body>
+</html>

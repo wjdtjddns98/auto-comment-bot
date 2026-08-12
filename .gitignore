@@ -12,3 +12,4 @@ dist/
 
 # omc 운영 아티팩트
 .omc/
+.gstack/

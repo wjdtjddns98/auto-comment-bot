@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<!-- nutti.co.kr/data-deletion.html 업로드용 초안 — Meta "데이터 삭제 안내 URL" 필드용.
+     콘솔이 콜백 URL(엔드포인트)만 허용하면 이 페이지 대신 백엔드 콜백 구현이 필요(후속 PR). -->
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>데이터 삭제 안내 — Nutti</title>
+  <style>
+    body { font-family: -apple-system, "Malgun Gothic", sans-serif; max-width: 720px;
+           margin: 40px auto; padding: 0 20px; line-height: 1.7; color: #222; }
+    h1 { font-size: 1.5rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+    ol li { margin: .4rem 0; }
+  </style>
+</head>
+<body>
+  <h1>데이터 삭제 안내 (Data Deletion Instructions)</h1>
+  <p>Nutti 의 키워드 모니터링 서비스와 연동된 Threads 계정 데이터의 삭제 절차입니다.</p>
+
+  <h2>연동 해제 (앱 권한 회수)</h2>
+  <ol>
+    <li>Threads 앱/웹 → <strong>설정 → 계정 → 웹사이트 권한</strong> 으로 이동합니다.</li>
+    <li>연결된 앱 목록에서 본 서비스를 선택하고 <strong>연동 해제</strong>합니다.</li>
+    <li>해제 즉시 서비스는 해당 계정의 API 접근 권한을 잃습니다.</li>
+  </ol>
+
+  <h2>저장 데이터 삭제 요청</h2>
+  <ol>
+    <li>아래 이메일로 삭제를 요청해 주세요: <strong>{{연락처 이메일}}</strong></li>
+    <li>요청 접수 후 <strong>7일 이내</strong>에 해당 계정의 액세스 토큰과 관련 저장
+      데이터를 파기하고, 완료 사실을 회신해 드립니다.</li>
+  </ol>
+
+  <p>기타 문의는 <a href="https://nutti.co.kr/privacy.html">개인정보처리방침</a>을
+  참고해 주세요.</p>
+</body>
+</html>
