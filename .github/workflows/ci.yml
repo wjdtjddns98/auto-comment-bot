@@ -33,12 +33,20 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
+          # 기본값 'some'(= 패턴 OR)이면 `'**'` 가 항상 매치해 `'!frontend/**'` 가 死문이
+          # 된다 — 실제로 프론트 전용 PR(#110)에서 백엔드 잡 3개가 전부 돌았다(이슈 #111).
+          # 'some-with-excludes' = "긍정 패턴 하나 이상 매치 + 부정 패턴 하나도 매치 안 함".
+          # 주의: 부정 패턴만 남기면(`- '!frontend/**'` 단독) 공식 문서상 **아무것도 매치하지
+          # 않아** 백엔드 잡이 영구 skip 되고, ci-ok 는 skip=통과라 헛green 이 된다.
+          predicate-quantifier: 'some-with-excludes'
           filters: |
             backend:
               - '**'
               - '!frontend/**'
             frontend:
               - 'frontend/**'
+      - name: 감지 결과(스킵 판정 근거를 로그에 남긴다)
+        run: echo "backend=${{ steps.filter.outputs.backend }} frontend=${{ steps.filter.outputs.frontend }}"
 
   test:
     name: Lint & Test (py${{ matrix.python-version }})
@@ -103,7 +111,7 @@ jobs:
         run: uv run pytest -m db
 
   frontend-build:
-    name: 프론트엔드 빌드(타입체크)
+    name: 프론트엔드 빌드 & 테스트
     needs: changes
     if: ${{ needs.changes.outputs.frontend == 'true' }}
     runs-on: ubuntu-latest
@@ -121,6 +129,10 @@ jobs:
         run: |
           npm ci
           npm run build
+      # vitest 는 package-lock 에 고정돼 위 npm ci 로 함께 설치된다(추가 러너 불필요).
+      # `npm test` = `vitest run` — watch 모드가 아니라 1회 실행 후 종료한다.
+      - name: Test (vitest)
+        run: npm test
 
   ci-ok:
     name: CI Gate
