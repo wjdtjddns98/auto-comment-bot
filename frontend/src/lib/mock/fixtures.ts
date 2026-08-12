@@ -100,6 +100,21 @@ export const MOCK_SOURCES: Source[] = [
     last_error: "FetchError: RSS 파싱 실패: SAXParseException",
     last_error_at: "2026-07-20T11:30:00Z",
   },
+  {
+    id: 5,
+    name: "중복 수집 재현용 (같은 글, 다른 검색어)",
+    type: "threads",
+    // 소스 1 과 같은 계정을 참조한다 — 계정 삭제 차단(R15) 문구가 여러 소스 id 를 담는 경우도
+    // 함께 재현된다. 같은 글이 검색어만 달라도 다른 소스로 재수집되는 것이 R16 의 전제다.
+    config: { query: "간식 추천", sns_account_id: 1 },
+    poll_interval_sec: 300,
+    enabled: true,
+    last_success_at: "2026-07-21T09:00:00Z",
+    health_status: "ok",
+    backoff_until: null,
+    last_error: null,
+    last_error_at: null,
+  },
 ];
 
 export const MOCK_KEYWORDS: Keyword[] = [
@@ -253,6 +268,20 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     matched_keyword_id: 1,
     published_at: "2026-07-21T10:00:00Z",
     matched_at: "2026-07-21T10:05:00Z",
+    status: "new",
+  },
+  {
+    id: 9,
+    // 매칭 7(소스 1)과 **같은 글**(th_1004)이 소스 5 로 재수집된 케이스. 매칭 7 에는 sent 이력이
+    // 있으므로 이 건의 승인은 409 로 막힌다(R16 중복 답글 차단) — 그 안내를 mock 에서 확인한다.
+    source_id: 5,
+    external_post_id: "th_1004",
+    author: "user_jkl",
+    url: "https://www.threads.net/@user_jkl/post/1004",
+    content: "강아지 간식 추천 감사합니다 계산기로 급여량 확인해봤어요",
+    matched_keyword_id: 1,
+    published_at: "2026-07-20T13:00:00Z",
+    matched_at: "2026-07-21T09:05:00Z",
     status: "new",
   },
 ];

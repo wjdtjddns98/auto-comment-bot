@@ -2,7 +2,6 @@ import { useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ApiError,
   approveMatch,
   getMatch,
   getSnsAccounts,
@@ -11,6 +10,7 @@ import {
   ignoreMatch,
   retryMatch,
 } from "../lib/apiClient";
+import { describeApiError, isDuplicateReplyConflict } from "../lib/errorMessage";
 import type { ApproveMatchResponse } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
@@ -29,13 +29,11 @@ import {
   toPlainText,
 } from "../lib/matchDisplay";
 
-function describeError(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.status === 409) return "이미 처리 중이거나 완료된 매칭입니다.";
-    return error.detail;
-  }
-  return "요청 처리 중 오류가 발생했습니다.";
-}
+// approve/retry 의 409 는 한 종류가 아니다 — 상태 충돌(CAS)·이미 전송된 매칭·**같은 게시물
+// 중복 답글 차단(R16, 다른 소스로 중복 수집된 글)** 이 모두 409 다. 상태코드로 뭉뚱그려
+// "이미 처리 중이거나 완료된 매칭" 이라 안내하면 R16 차단이 상태 문제로 오인돼, 사용자가
+// 새로고침해도 status 가 `new` 인 채라 계속 재시도하게 된다. 그래서 서버 문구를 그대로 쓴다
+// (describeApiError). 아래 배너는 R16 차단일 때만 붙는 추가 안내다.
 
 export default function MatchDetailPage() {
   const { id: idParam } = useParams();
@@ -57,6 +55,8 @@ export default function MatchDetailPage() {
   const [snsAccountId, setSnsAccountId] = useState<number | "">("");
   const [lastResult, setLastResult] = useState<ApproveMatchResponse | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // R16 중복 답글 차단 여부 — 문구만으로는 "무시로 종료하면 된다"는 다음 행동이 안 보인다.
+  const [duplicateBlocked, setDuplicateBlocked] = useState(false);
   const [copyDone, setCopyDone] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: ToastTone } | null>(null);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -103,10 +103,14 @@ export default function MatchDetailPage() {
     onSuccess: (res) => {
       setLastResult(res);
       setActionError(null);
+      setDuplicateBlocked(false);
       setCopyDone(false);
       if (res.action === "approved") void autoCopy(res.clipboard_body);
     },
-    onError: (err) => setActionError(describeError(err)),
+    onError: (err) => {
+      setActionError(describeApiError(err));
+      setDuplicateBlocked(isDuplicateReplyConflict(err));
+    },
     // 409/502 실패 시에도 서버가 상태를 되돌리거나 reply_actions 를 기록하므로 재조회가 필요하다.
     onSettled: () => invalidate(),
   });
@@ -129,10 +133,14 @@ export default function MatchDetailPage() {
     onSuccess: (res) => {
       setLastResult(res);
       setActionError(null);
+      setDuplicateBlocked(false);
       setCopyDone(false);
       if (res.action === "approved") void autoCopy(res.clipboard_body);
     },
-    onError: (err) => setActionError(describeError(err)),
+    onError: (err) => {
+      setActionError(describeApiError(err));
+      setDuplicateBlocked(isDuplicateReplyConflict(err));
+    },
     onSettled: () => invalidate(),
   });
 
@@ -286,6 +294,14 @@ export default function MatchDetailPage() {
           )}
 
           {actionError && <p className="text-sm text-tone-danger">{actionError}</p>}
+          {/* 서버 문구는 이유만 말한다 — 이 매칭이 계속 `new` 로 남아 재시도를 유도하므로
+              다음 행동(무시로 종료)까지 붙여준다. */}
+          {duplicateBlocked && (
+            <p className="text-xs text-tone-warning">
+              같은 글이 다른 소스로도 수집돼 이미 답글이 나갔습니다. 이 매칭은 승인·재시도가 계속
+              막히니 <strong>무시</strong>로 종료하세요. 답글은 원문 링크에서 확인할 수 있습니다.
+            </p>
+          )}
         </Card>
       ) : verifyPending ? (
         <Card className="flex flex-col gap-3">

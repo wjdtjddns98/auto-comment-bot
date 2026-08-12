@@ -1,6 +1,8 @@
 import { Fragment, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  ApiError,
   connectThreadsOAuth,
   createSnsAccount,
   deleteSnsAccount,
@@ -306,7 +308,11 @@ export default function AdminSnsAccountsPage() {
     queryKey: ["snsAccounts"],
     queryFn: getSnsAccounts,
   });
-  const [rowError, setRowError] = useState<{ id: number; message: string } | null>(null);
+  // blocked: 참조 소스 존재로 삭제가 막힌 409(R15) — 서버 문구에 소스 id 가 들어 있어
+  // 그대로 노출하고, 조치할 화면(소스 관리)으로 가는 길만 덧붙인다.
+  const [rowError, setRowError] = useState<{ id: number; message: string; blocked: boolean } | null>(
+    null
+  );
   const [replacingId, setReplacingId] = useState<number | null>(null);
 
   const deleteMutation = useMutation({
@@ -315,8 +321,38 @@ export default function AdminSnsAccountsPage() {
       setRowError(null);
       queryClient.invalidateQueries({ queryKey: ["snsAccounts"] });
     },
-    onError: (err, id) => setRowError({ id, message: describeApiError(err) }),
+    onError: (err, id) =>
+      setRowError({
+        id,
+        message: describeApiError(err),
+        blocked: err instanceof ApiError && err.status === 409,
+      }),
   });
+
+  // 안내는 카드(모바일)·표(데스크톱) 양쪽에서 같아야 한다.
+  function renderDeleteError(accountId: number) {
+    if (rowError?.id !== accountId) return null;
+    return (
+      <div className="text-sm text-tone-danger">
+        <p>{rowError.message}</p>
+        {rowError.blocked && isAdmin && (
+          <p className="mt-0.5 text-xs text-gray-500">
+            <Link to="/admin/sources" className="text-brand-600 hover:underline">
+              소스 관리
+            </Link>
+            에서 해당 소스를 삭제하거나 다른 계정으로 바꾼 뒤 다시 시도하세요. 비활성 소스도
+            참조로 셉니다.
+          </p>
+        )}
+        {rowError.blocked && !isAdmin && (
+          <p className="mt-0.5 text-xs text-gray-500">
+            소스 설정은 관리자만 바꿀 수 있습니다 — 관리자에게 해당 소스 정리를 요청하세요.
+            비활성 소스도 참조로 셉니다.
+          </p>
+        )}
+      </div>
+    );
+  }
 
   const columnCount = isAdmin ? 6 : 5;
 
@@ -404,9 +440,7 @@ export default function AdminSnsAccountsPage() {
                       />
                     </div>
                   )}
-                  {rowError?.id === account.id && (
-                    <p className="text-sm text-tone-danger">{rowError.message}</p>
-                  )}
+                  {renderDeleteError(account.id)}
                 </Card>
               );
             })}
@@ -485,9 +519,7 @@ export default function AdminSnsAccountsPage() {
                     )}
                     {rowError?.id === account.id && (
                       <Tr>
-                        <Td colSpan={columnCount} className="text-sm text-tone-danger">
-                          {rowError.message}
-                        </Td>
+                        <Td colSpan={columnCount}>{renderDeleteError(account.id)}</Td>
                       </Tr>
                     )}
                   </Fragment>

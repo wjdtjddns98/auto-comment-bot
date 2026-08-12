@@ -8,6 +8,46 @@ import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field, Input, Textarea } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
+import { THREADS_BODY_LIMIT } from "../lib/matchDisplay";
+
+// 치환은 서버(POST /api/matches/render-template)가 한다 — 여기서는 문법만 안내한다.
+// 안내가 일괄 발송 화면에만 있으면 정작 템플릿을 쓰는 순간에는 보이지 않아, 변형 없는
+// 템플릿이 만들어지고 N건이 같은 문구로 나간다(중복 콘텐츠 = 스팸 신호).
+function TemplateSyntaxHelp() {
+  return (
+    <div className="rounded-md bg-gray-50 p-3 text-xs text-gray-600">
+      <p className="font-medium text-gray-700">치환 문법</p>
+      <ul className="mt-1 flex flex-col gap-0.5">
+        <li>
+          <code>{"{{안녕하세요|반갑습니다}}"}</code> — 후보 중 하나를 <strong>건마다 따로</strong>{" "}
+          뽑습니다. 같은 템플릿으로 여러 건을 보내도 문구가 갈립니다.
+        </li>
+        <li>
+          <code>{"{{author}}"}</code>·<code>{"{{keyword}}"}</code>·<code>{"{{url}}"}</code> — 그
+          글의 작성자·매칭 키워드·원문 링크로 채워집니다.
+        </li>
+        <li>
+          값이 없는 변수(작성자 미확보)나 오타 변수는 <strong>그 건만 미리보기에서 제외</strong>
+          됩니다 — 빈 문구로 나가지 않습니다.
+        </li>
+      </ul>
+    </div>
+  );
+}
+
+// 치환 결과 길이는 뽑히는 변형에 따라 달라져 여기서 확정할 수 없다 — 원문만으로 이미 상한을
+// 넘으면 어떤 변형을 뽑아도 초과라, 그때만 경고한다(승인 화면에서 최종 검사).
+function BodyLengthHint({ body }: { body: string }) {
+  const over = body.length > THREADS_BODY_LIMIT;
+  return (
+    <p className={`text-xs ${over ? "text-tone-danger" : "text-gray-400"}`}>
+      {body.length}/{THREADS_BODY_LIMIT}자
+      {over
+        ? " — 치환 전에 이미 Threads 상한을 넘었습니다. 이 템플릿으로는 전송이 실패합니다."
+        : " (Threads 전송 상한 기준 — 치환 결과 길이는 달라질 수 있습니다)"}
+    </p>
+  );
+}
 
 function CreateTemplateForm() {
   const queryClient = useQueryClient();
@@ -46,9 +86,11 @@ function CreateTemplateForm() {
           rows={3}
           value={body}
           onChange={(e) => setBody(e.target.value)}
-          placeholder="답변 문구를 입력하세요."
+          placeholder="예: {{안녕하세요|반갑습니다}} {{keyword}} 관련해서 도움이 될 만한 내용이 있어 남깁니다."
         />
+        <BodyLengthHint body={body} />
       </Field>
+      <TemplateSyntaxHelp />
       {error && <p className="text-sm text-tone-danger">{error}</p>}
       <Button onClick={handleSubmit} disabled={mutation.isPending} className="self-start">
         {mutation.isPending ? "추가 중…" : "추가"}
@@ -95,7 +137,10 @@ function TemplateRow({ template }: { template: Template }) {
         </Td>
         <Td className="max-w-md">
           {editing ? (
-            <Textarea rows={2} value={body} onChange={(e) => setBody(e.target.value)} />
+            <>
+              <Textarea rows={2} value={body} onChange={(e) => setBody(e.target.value)} />
+              <BodyLengthHint body={body} />
+            </>
           ) : (
             <span className="line-clamp-2 whitespace-pre-wrap">{template.body}</span>
           )}
