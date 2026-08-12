@@ -1,15 +1,21 @@
-"""/api/templates — 답변 템플릿 CRUD (admin, API-SPEC §템플릿)."""
+"""/api/templates — 답변 템플릿 CRUD (읽기=로그인 사용자, 쓰기=admin, API-SPEC §템플릿).
+
+읽기 개방 근거는 `sources.py` 상단 참조 — 템플릿을 못 읽으면 reviewer 는 승인 화면에서
+문구를 매번 직접 타이핑해야 했다(이슈 #104). 템플릿 본문은 어차피 승인 시 외부로
+나가는 공개 문구이고, 렌더 미리보기(`/api/matches/render-template`)는 이미 로그인
+사용자 전체에 열려 있어 권한 경계도 이쪽이 정합적이다.
+"""
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.api.deps import require_admin, require_csrf
+from app.api.deps import current_user, require_admin, require_csrf
 from app.api.schemas import PatchModel
 from app.models import ReplyTemplate, User
 
 router = APIRouter(
-    prefix="/api/templates", tags=["templates"], dependencies=[Depends(require_admin)]
+    prefix="/api/templates", tags=["templates"], dependencies=[Depends(current_user)]
 )
 
 
@@ -46,7 +52,9 @@ async def create_template(
     return TemplateOut.model_validate(t)
 
 
-@router.patch("/{template_id}", dependencies=[Depends(require_csrf)])
+@router.patch(
+    "/{template_id}", dependencies=[Depends(require_admin), Depends(require_csrf)]
+)
 async def update_template(template_id: int, body: TemplatePatch) -> TemplateOut:
     t = await ReplyTemplate.get_or_none(id=template_id)
     if t is None:
@@ -57,7 +65,10 @@ async def update_template(template_id: int, body: TemplatePatch) -> TemplateOut:
     return TemplateOut.model_validate(t)
 
 
-@router.delete("/{template_id}", status_code=204, dependencies=[Depends(require_csrf)])
+@router.delete(
+    "/{template_id}", status_code=204,
+    dependencies=[Depends(require_admin), Depends(require_csrf)],
+)
 async def delete_template(template_id: int) -> None:
     if not await ReplyTemplate.filter(id=template_id).delete():
         raise HTTPException(status_code=404, detail="템플릿이 없습니다")

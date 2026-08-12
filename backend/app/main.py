@@ -13,6 +13,7 @@ from app import poller, reconcile, reply
 from app.api.auth import router as auth_router
 from app.api.keywords import router as keywords_router
 from app.api.matches import router as matches_router
+from app.api.reply_actions import router as reply_actions_router
 from app.api.sns_accounts import router as sns_accounts_router
 from app.api.sources import router as sources_router
 from app.api.templates import router as templates_router
@@ -75,6 +76,7 @@ app.include_router(keywords_router)
 app.include_router(templates_router)
 app.include_router(sns_accounts_router)
 app.include_router(matches_router)
+app.include_router(reply_actions_router)
 
 
 @app.get("/health")

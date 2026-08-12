@@ -32,7 +32,14 @@ Req `{ "email": "...", "password": "..." }` → 200 + 세션쿠키 `{ "id", "ema
 
 ---
 
-## 소스 (admin)
+## 소스 (읽기=로그인 사용자, 쓰기=admin)
+
+> **권한(변경 2026-08-12, 이슈 #104)**: `GET` 은 **로그인 사용자 전체**(reviewer 포함),
+> `POST`/`PATCH`/`DELETE` 는 **admin 전용**(403). 승인 화면이 소스 이름·health 배지·
+> `type`(전송 가능 소스 판정)에 의존해서다 — reviewer 가 403 이면 소스 열이 `#8` 로 뜨고
+> 전송 소스가 "복사 전용" 으로 오표기됐다. `config` 는 어댑터 스키마로 키가 고정돼 있어
+> (`rss_url` / `query`·`sns_account_id`) 자격증명이 실릴 수 없다(불변식 ③).
+> 키워드·템플릿도 같은 규칙이다.
 
 ### `GET /api/sources`
 200 `[{ id, name, type, config, poll_interval_sec, enabled, last_success_at, health_status, backoff_until, last_error, last_error_at }]`
@@ -83,7 +90,7 @@ Req(부분) `{ name?, enabled?, poll_interval_sec?, config? }` → 200. `config`
 
 ---
 
-## 키워드 (admin)
+## 키워드 (읽기=로그인 사용자, 쓰기=admin — §소스 권한 주석 참조)
 
 ### `GET /api/keywords` → 200 `[{ id, pattern, match_type, enabled, source_scope }]`
 ### `POST /api/keywords`
@@ -93,7 +100,7 @@ Req `{ pattern, match_type: "substring|regex", source_scope?: int|null }` → 20
 
 ---
 
-## 템플릿 (admin)
+## 템플릿 (읽기=로그인 사용자, 쓰기=admin — §소스 권한 주석 참조)
 
 ### `GET /api/templates` → 200 `[{ id, name, body, enabled }]`
 ### `POST /api/templates` Req `{ name, body }` → 201.
@@ -176,7 +183,12 @@ Req `{ code, state, display_name? }` → 201 `{ id, user_id, platform, display_n
 ### `GET /api/matches`
 Query: `status`(new|reviewing|sending|replied|ignored|verify_pending), `source_id`, `page`, `size`.
 > `verify_pending`(M2): 전송 결과 불명 — 자동 조정 대기. **읽기 전용 뱃지로 표시**, approve/retry 는 409, ignore 만 가능. 조정이 끝나면 서버가 `replied`(게시 확인) 또는 `reviewing`(미게시 판정 — retry 재개) 으로 전이시킨다.
-200 `{ items: [{ id, source_id, external_post_id, author, url, content, matched_keyword_id, published_at, matched_at, status }], total }`
+200 `{ items: [{ id, source_id, external_post_id, author, url, content, matched_keyword_id, published_at, matched_at, status, sending_claimed_at }], total }`
+
+> **`sending_claimed_at`(신규, 이슈 #101 요청 2-a)**: `new|reviewing → sending` 전이 시각
+> (approve/retry 의 CAS 클레임이 찍는다). 처리 이력에 "전송중" 전이 시각을 표시하기 위한
+> 필드. 클레임이 풀린 뒤(`replied`/`reviewing`)에도 마지막 시도 값이 남으므로, 화면에서는
+> `status` 와 `reply_actions` 의 후속 행을 함께 보고 판단할 것. 아직 승인된 적 없으면 null.
 
 ### `GET /api/matches/{id}`
 200 매칭 상세 + `reply_actions` 이력 요약.
@@ -243,8 +255,17 @@ Req `{ template_id?: int, final_body: string, sns_account_id?: int }`
 
 ## 감사 로그 (reviewer/admin)
 
-### `GET /api/reply-actions?match_id=...`
-200 `[{ id, matched_post_id, reviewer_user_id, action, external_reply_id, error, created_at }]` (append-only).
+### `GET /api/reply-actions`
+Query: `match_id`(선택 — 그 매칭 이력만), `limit`(선택, 1~500, **기본 200**).
+200 `[{ id, matched_post_id, reviewer_user_id, action, template_id, external_reply_id, error, created_at }]` (append-only).
+
+- **정렬 `created_at desc`**(동시각은 `id desc`). append-only 라 전량 반환하지 않고 **최신
+  `limit` 건**만 준다 — 기본 200건을 넘겨 봐야 하면 `limit` 을 올린다(상한 500).
+- 권한은 **로그인 사용자**(reviewer 포함) — 이 화면은 "누가 무엇을 승인했나"를 함께 보는 용도다.
+- `final_body`·`sns_account_id` 는 **미포함**: 전자는 목록을 수십 KB 로 부풀리고, 후자는
+  계정 셀프서비스 경계(본인 것만 조회)를 감사 로그가 우회하는 통로가 된다.
+- `action` = `approved|sent|failed|canceled|unknown`. `matched_post_id` 는 매칭 상세로 링크하기
+  위한 값이다(매칭 상세에 embed 되는 `reply_actions` 에는 없다 — 부모가 곧 그 값이라서).
 
 ---
 

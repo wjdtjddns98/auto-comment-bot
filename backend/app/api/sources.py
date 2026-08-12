@@ -1,4 +1,11 @@
-"""/api/sources — 소스 CRUD (admin, API-SPEC §소스)."""
+"""/api/sources — 소스 CRUD (읽기=로그인 사용자, 쓰기=admin, API-SPEC §소스).
+
+읽기를 reviewer 에게도 여는 이유(이슈 #104): 승인 화면이 소스 이름·health 배지·
+`type`(전송 가능 소스 판정)에 의존한다. 라우터를 admin 으로 잠그면 reviewer 화면에서
+소스 열이 `#8` 로 뜨고 전송 소스가 "복사 전용" 으로 오표기된다. `config` 는 어댑터
+config_model(`extra="forbid"`)로 키가 고정돼 있어(rss_url / query·sns_account_id)
+자격증명이 실릴 수 없다 — 불변식 ③ 저촉 없음. 토큰은 sns_account_secrets 전용.
+"""
 from datetime import datetime
 from typing import Annotated, Any
 
@@ -8,7 +15,7 @@ from tortoise.exceptions import IntegrityError
 from tortoise.transactions import in_transaction
 
 from app import poller
-from app.api.deps import require_admin, require_csrf
+from app.api.deps import current_user, require_admin, require_csrf
 from app.api.schemas import PatchModel
 from app.models import (
     HealthStatus,
@@ -23,7 +30,7 @@ from app.models import (
 from app.sources import get_adapter
 
 router = APIRouter(
-    prefix="/api/sources", tags=["sources"], dependencies=[Depends(require_admin)]
+    prefix="/api/sources", tags=["sources"], dependencies=[Depends(current_user)]
 )
 
 
@@ -111,7 +118,9 @@ async def create_source(
     return SourceOut.model_validate(s)
 
 
-@router.patch("/{source_id}", dependencies=[Depends(require_csrf)])
+@router.patch(
+    "/{source_id}", dependencies=[Depends(require_admin), Depends(require_csrf)]
+)
 async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
     changes = body.model_dump(exclude_unset=True)
     if "name" in changes:
@@ -136,7 +145,10 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
     return SourceOut.model_validate(s)
 
 
-@router.delete("/{source_id}", status_code=204, dependencies=[Depends(require_csrf)])
+@router.delete(
+    "/{source_id}", status_code=204,
+    dependencies=[Depends(require_admin), Depends(require_csrf)],
+)
 async def delete_source(source_id: int) -> None:
     """소스 삭제 — 수집물(매칭·발송 이력 포함)과 스코프 키워드를 함께 정리한다.
 

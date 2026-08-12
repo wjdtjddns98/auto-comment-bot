@@ -54,6 +54,11 @@ class MatchOut(BaseModel):
     published_at: datetime | None
     matched_at: datetime
     status: PostStatus
+    # 전송중(sending) 전이 시각 — approve 의 CAS 클레임이 찍는 값(펜싱 토큰 겸용).
+    # 화면의 "처리 이력" 이 approve/sent/failed 만 보여주고 sending 전이는 시각이
+    # 없어 비어 보이던 문제(이슈 #101 요청 2-a). 클레임이 풀리면(replied/reviewing)
+    # 값은 남지만 그때는 후속 액션 행이 이력에 있으므로 표시 기준은 FE 가 잡는다.
+    sending_claimed_at: datetime | None
 
 
 class MatchListOut(BaseModel):
