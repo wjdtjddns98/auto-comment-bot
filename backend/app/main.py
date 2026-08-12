@@ -17,6 +17,7 @@ from app.api.reply_actions import router as reply_actions_router
 from app.api.sns_accounts import router as sns_accounts_router
 from app.api.sources import router as sources_router
 from app.api.templates import router as templates_router
+from app.api.users import router as users_router
 from app.config import settings
 from app.db import TORTOISE_ORM
 from app.models import Source
@@ -77,6 +78,7 @@ app.include_router(templates_router)
 app.include_router(sns_accounts_router)
 app.include_router(matches_router)
 app.include_router(reply_actions_router)
+app.include_router(users_router)
 
 
 @app.get("/health")
