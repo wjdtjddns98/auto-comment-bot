@@ -708,9 +708,9 @@ function handleGetReplyActions(query: MockRequestOptions["query"]): ReplyAction[
     .slice(0, limit);
 }
 
-// ---- 사용자 관리 (admin, 제안 계약 — types/api.ts 주석 참조) ----
-
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// ---- 사용자 관리 (admin — docs/API-SPEC.md §사용자 관리, 2026-08-12 확정) ----
+// 실서버(backend/app/api/users.py)와 상태코드·판정을 맞춰 둔다. 목업이 더 관대하면
+// dev:mock 에서만 되는 조작을 실서버에서 실패로 만나게 된다(삭제 가드가 그 사례였다).
 
 function adminCount(): number {
   return users.filter((u) => u.role === "admin").length;
@@ -718,17 +718,23 @@ function adminCount(): number {
 
 function handleGetUsers(): AdminUser[] {
   requireAdmin();
-  return users.map(toAdminUser);
+  return [...users].sort((a, b) => a.id - b.id).map(toAdminUser);
 }
 
 function handleCreateUser(body: unknown): AdminUser {
   requireAdmin();
   const req = (body ?? {}) as Partial<CreateUserRequest>;
   const email = req.email?.trim() ?? "";
-  if (!EMAIL_RE.test(email)) throw new MockApiError(422, "email: 올바른 이메일 형식이 아닙니다");
-  if (users.some((u) => u.email === email)) throw new MockApiError(422, "email: 이미 사용 중인 이메일입니다");
-  if (!req.password || req.password.length < 8) {
-    throw new MockApiError(422, "password: 8자 이상이어야 합니다");
+  // 서버는 정규식으로 보지 않는다 — 로그인이 평문 정확 대조라 생성만 엄격하면
+  // "만들 수는 있는데 로그인이 안 되는" 계정이 생긴다. `@` 포함·공백 없음·3~255자만 본다.
+  if (email.length < 3 || email.length > 255 || !email.includes("@") || email.includes(" ")) {
+    throw new MockApiError(422, "email: 이메일 형식이 아닙니다");
+  }
+  if (users.some((u) => u.email === email)) {
+    throw new MockApiError(409, "이미 등록된 이메일입니다");
+  }
+  if (!req.password || req.password.length < 8 || req.password.length > 200) {
+    throw new MockApiError(422, "password: 8자 이상 200자 이하여야 합니다");
   }
   if (req.role !== "admin" && req.role !== "reviewer") {
     throw new MockApiError(422, "role: admin 또는 reviewer 여야 합니다");
@@ -745,34 +751,58 @@ function handleCreateUser(body: unknown): AdminUser {
 }
 
 function handlePatchUser(id: number, body: unknown): AdminUser {
-  const actor = requireAdmin();
+  requireAdmin();
   const record = users.find((u) => u.id === id);
-  if (!record) throw new MockApiError(404, "사용자를 찾을 수 없습니다.");
-  const req = (body ?? {}) as PatchUserRequest;
-  if (req.role !== undefined) {
-    if (req.role !== "admin" && req.role !== "reviewer") {
-      throw new MockApiError(422, "role: admin 또는 reviewer 여야 합니다");
-    }
-    if (record.id === actor.id && req.role !== "admin") {
-      throw new MockApiError(422, "본인의 관리자 권한은 스스로 해제할 수 없습니다.");
-    }
-    if (record.role === "admin" && req.role !== "admin" && adminCount() <= 1) {
-      throw new MockApiError(422, "마지막 관리자의 역할은 변경할 수 없습니다.");
-    }
-    record.role = req.role;
+  if (!record) throw new MockApiError(404, "사용자가 없습니다");
+  const req = (body ?? {}) as Partial<PatchUserRequest>;
+  if (req.role !== "admin" && req.role !== "reviewer") {
+    throw new MockApiError(422, "role: admin 또는 reviewer 여야 합니다");
   }
+  // 자기 강등은 다른 admin 이 있으면 허용된다(서버와 동일) — 막는 건 "마지막 admin" 뿐이다.
+  if (record.role === "admin" && req.role !== "admin" && adminCount() <= 1) {
+    throw new MockApiError(
+      409,
+      "마지막 admin 은 강등할 수 없습니다 — 다른 사용자를 admin 으로 올린 뒤 다시 시도해 주세요"
+    );
+  }
+  record.role = req.role;
   return toAdminUser(record);
+}
+
+/** 삭제를 막아야 하는 참조를 한 문장으로. 없으면 null (서버 `_blocking_references` 대응). */
+function blockingReferences(userId: number): string | null {
+  // FE 계약에 소유자가 드러나는 건 SNS 계정뿐이다(소스·키워드·템플릿은 응답에 user_id 가 없다).
+  // 실서버는 그 3종도 함께 보고 막으므로, 목업에서 통과했다고 삭제 가능하다는 뜻은 아니다.
+  const owned = snsAccounts.filter((a) => a.user_id === userId).length;
+  if (owned) {
+    return (
+      `이 사용자가 소유한 리소스가 있어 삭제할 수 없습니다(SNS 계정 ${owned}건)` +
+      " — 삭제하면 함께 사라집니다. 먼저 정리하거나 다른 계정으로 옮겨 주세요"
+    );
+  }
+  if (replyActions.some((a) => a.reviewer_user_id === userId)) {
+    return (
+      "승인/처리 이력이 있는 사용자는 삭제할 수 없습니다" +
+      " — 감사 로그는 보존됩니다(역할을 reviewer 로 낮춰 사용을 중단시켜 주세요)"
+    );
+  }
+  return null;
 }
 
 function handleDeleteUser(id: number): void {
   const actor = requireAdmin();
+  if (id === actor.id) throw new MockApiError(409, "자기 자신은 삭제할 수 없습니다");
   const idx = users.findIndex((u) => u.id === id);
-  if (idx === -1) throw new MockApiError(404, "사용자를 찾을 수 없습니다.");
+  if (idx === -1) throw new MockApiError(404, "사용자가 없습니다");
   const record = users[idx];
-  if (record.id === actor.id) throw new MockApiError(422, "본인 계정은 삭제할 수 없습니다.");
   if (record.role === "admin" && adminCount() <= 1) {
-    throw new MockApiError(422, "마지막 관리자는 삭제할 수 없습니다.");
+    throw new MockApiError(
+      409,
+      "마지막 admin 은 삭제할 수 없습니다 — 다른 사용자를 admin 으로 올린 뒤 다시 시도해 주세요"
+    );
   }
+  const blocking = blockingReferences(id);
+  if (blocking) throw new MockApiError(409, blocking);
   users.splice(idx, 1);
 }
 

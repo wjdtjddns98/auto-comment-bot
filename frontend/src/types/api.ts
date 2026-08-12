@@ -210,8 +210,8 @@ export interface RenderTemplateResponse {
 }
 
 // --- 사용자 관리 (admin, PRD FR-19) ---
-// ⚠️ docs/API-SPEC.md 에 아직 없는 제안 계약(백엔드 미확정). /api/users 라우터가
-// 실제로 추가되면 이 타입·엔드포인트를 백엔드와 맞춰 확정할 것 — 임의 구현 아님, 확인 필요.
+// 2026-08-12 확정(이슈 #102 / PR #106) — docs/API-SPEC.md §사용자 관리. 제안했던 계약
+// 그대로이며 **삭제에만 서버 가드가 추가**됐다(소유 리소스·이력이 있으면 409).
 export interface AdminUser extends User {
   created_at: string;
 }
@@ -222,6 +222,7 @@ export interface CreateUserRequest {
   role: Role;
 }
 
+// 서버는 `role` 만 받고, 필수다(비밀번호 재설정은 이번 계약에 없다).
 export interface PatchUserRequest {
-  role?: Role;
+  role: Role;
 }

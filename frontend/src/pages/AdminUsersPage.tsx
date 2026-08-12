@@ -1,5 +1,7 @@
-// ⚠️ /api/users 는 아직 백엔드 미확정 제안 계약이다(types/api.ts 주석 참조).
-// 목업 서버(lib/mock/mockServer.ts) 기준으로 구현했으며, 실제 API 확정 후 재검증이 필요하다.
+// /api/users 는 2026-08-12 확정(#102 / PR #106) — docs/API-SPEC.md §사용자 관리.
+// 서버와 다른 두 지점만 화면에서 처리한다:
+//  - 자기 강등은 (다른 admin 이 있으면) 허용되고 재로그인 없이 즉시 적용된다 → 확인 + 세션 갱신.
+//  - 삭제는 소유 리소스·이력이 있으면 409 로 막히고 이유가 문장으로 온다 → detail 을 그대로 노출.
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createUser, deleteUser, getUsers, patchUser } from "../lib/apiClient";
@@ -101,6 +103,10 @@ function useUserActions(user: AdminUser) {
     onSuccess: () => {
       setError(null);
       invalidate();
+      // 서버는 역할을 매 요청 DB 에서 읽는다 — 자기 강등은 즉시 유효하다. 세션 캐시의 role 이
+      // 낡은 채로 남으면 admin 화면에 머물러 이후 요청이 전부 403 이 된다. 갱신하면
+      // AdminRoute 가 대시보드로 돌려보낸다.
+      if (isSelf) queryClient.invalidateQueries({ queryKey: ["auth", "me"] });
     },
     onError: (err) => setError(describeApiError(err)),
   });
@@ -111,11 +117,23 @@ function useUserActions(user: AdminUser) {
     onError: (err) => setError(describeApiError(err)),
   });
 
-  return { error, isSelf, patchMutation, deleteMutation };
+  // 자기 강등은 되돌릴 방법이 화면에 없다(강등 직후 이 화면에서 밀려난다) — 한 번 묻는다.
+  function changeRole(next: Role) {
+    if (isSelf && next !== "admin") {
+      const ok = window.confirm(
+        "본인 역할을 검토자로 낮춥니다. 즉시 적용되어 관리 화면에서 밀려나고," +
+          " 되돌리려면 다른 관리자가 필요합니다. 계속할까요?"
+      );
+      if (!ok) return;
+    }
+    patchMutation.mutate(next);
+  }
+
+  return { error, isSelf, patchMutation, deleteMutation, changeRole };
 }
 
 function UserCard({ user }: { user: AdminUser }) {
-  const { error, isSelf, patchMutation, deleteMutation } = useUserActions(user);
+  const { error, isSelf, patchMutation, deleteMutation, changeRole } = useUserActions(user);
 
   return (
     <Card className="flex flex-col gap-3">
@@ -134,7 +152,7 @@ function UserCard({ user }: { user: AdminUser }) {
         <Select
           value={user.role}
           disabled={patchMutation.isPending}
-          onChange={(e) => patchMutation.mutate(e.target.value as Role)}
+          onChange={(e) => changeRole(e.target.value as Role)}
         >
           {ROLES.map((r) => (
             <option key={r} value={r}>
@@ -148,7 +166,11 @@ function UserCard({ user }: { user: AdminUser }) {
         variant="danger"
         className="self-start"
         disabled={deleteMutation.isPending || isSelf}
-        title={isSelf ? "본인 계정은 삭제할 수 없습니다." : undefined}
+        title={
+          isSelf
+            ? "본인 계정은 삭제할 수 없습니다."
+            : "소유 리소스·승인 이력이 없는 계정만 삭제할 수 있습니다."
+        }
         onClick={() => deleteMutation.mutate()}
       >
         삭제
@@ -159,7 +181,7 @@ function UserCard({ user }: { user: AdminUser }) {
 }
 
 function UserRow({ user }: { user: AdminUser }) {
-  const { error, isSelf, patchMutation, deleteMutation } = useUserActions(user);
+  const { error, isSelf, patchMutation, deleteMutation, changeRole } = useUserActions(user);
 
   return (
     <>
@@ -176,7 +198,7 @@ function UserRow({ user }: { user: AdminUser }) {
           <Select
             value={user.role}
             disabled={patchMutation.isPending}
-            onChange={(e) => patchMutation.mutate(e.target.value as Role)}
+            onChange={(e) => changeRole(e.target.value as Role)}
           >
             {ROLES.map((r) => (
               <option key={r} value={r}>
@@ -191,7 +213,11 @@ function UserRow({ user }: { user: AdminUser }) {
             size="sm"
             variant="danger"
             disabled={deleteMutation.isPending || isSelf}
-            title={isSelf ? "본인 계정은 삭제할 수 없습니다." : undefined}
+            title={
+              isSelf
+                ? "본인 계정은 삭제할 수 없습니다."
+                : "소유 리소스·승인 이력이 없는 계정만 삭제할 수 있습니다."
+            }
             onClick={() => deleteMutation.mutate()}
           >
             삭제
@@ -218,6 +244,11 @@ export default function AdminUsersPage() {
         <h1 className="text-xl font-semibold text-gray-900">사용자 관리</h1>
         <p className="text-sm text-gray-500">
           내부 사용자 계정과 역할(관리자/검토자)을 관리합니다.
+        </p>
+        {/* 삭제가 거의 항상 막히는 이유를 실패 후에야 알게 되는 걸 피한다 — 실제 사용 중단 수단은 강등이다. */}
+        <p className="mt-1 text-sm text-gray-500">
+          삭제는 소유한 소스·키워드·템플릿·SNS 계정과 승인 이력이 <strong>모두 없는 계정</strong>에만
+          됩니다. 이미 활동한 계정은 역할을 <strong>검토자</strong>로 낮춰 사용을 중단시키세요.
         </p>
       </div>
 

@@ -256,7 +256,9 @@ export const connectThreadsOAuth = (body: ThreadsOAuthConnectRequest) =>
 export const getReplyActions = (query?: { match_id?: number; limit?: number }) =>
   request<ReplyAction[]>("/api/reply-actions", { query });
 
-// --- 사용자 관리 (admin, 제안 계약 — docs/API-SPEC.md 미확정, types/api.ts 주석 참조) ---
+// --- 사용자 관리 (admin 전용 — docs/API-SPEC.md §사용자 관리) ---
+// 삭제는 "아무것도 하지 않은 계정" 에만 열린다. 소유 리소스(소스·키워드·템플릿·SNS 계정)나
+// 승인 이력이 있으면 409 + 이유가 온다 — 호출부는 그 detail 을 그대로 보여줘야 한다.
 export const getUsers = () => request<AdminUser[]>("/api/users");
 export const createUser = (body: CreateUserRequest) =>
   request<AdminUser>("/api/users", { method: "POST", body });
