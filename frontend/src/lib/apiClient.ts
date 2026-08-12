@@ -146,13 +146,23 @@ async function request<T>(
     credentials: "include",
   });
 
-  // 403 = CSRF 토큰 만료. 캐시를 비우고 1회만 재발급·재시도한다.
-  // 무효화는 "내가 보낸 토큰이 아직 캐시에 있을 때"로 한정한다 — 다른 갈래가 이미
-  // 재발급을 끝낸 뒤 뒤늦게 403 이 도착했는데 조건 없이 비우면, 갓 받아온 토큰을
-  // 버리고 불필요한 재발급이 갈래 수만큼 더 나간다(apiClient.csrf.test.ts 로 고정).
+  // 403 은 CSRF 불일치만 뜻하지 않는다 — 서버는 권한 부족에도 403 을 낸다
+  // (backend/app/api/deps.py `require_admin`: "admin 권한이 필요합니다"). detail 문자열로
+  // 갈라내는 건 깨지기 쉬우므로, **토큰을 다시 받아보고 실제로 달라졌을 때만** 재시도한다.
+  //
+  // CSRF 토큰은 Fernet 세션 페이로드 안에 있어(backend/app/auth.py) `/api/auth/csrf` 는
+  // 매번 같은 값을 준다. 값이 달라지는 경우는 세션 쿠키가 교체됐을 때(다른 탭에서 재로그인)
+  // 뿐이고, 재시도가 구제할 수 있는 상황도 그 하나뿐이다. 토큰이 그대로면 재시도해도 같은
+  // 403 이므로 뮤테이션을 한 번 더 보내지 않고 아래 에러 경로로 떨어뜨린다.
   if (res.status === 403 && isMutating && retryOn403) {
-    if (headers["X-CSRF-Token"] === csrfToken) csrfToken = null;
-    return request<T>(path, options, false);
+    const sent = headers["X-CSRF-Token"];
+    // 무효화는 "내가 보낸 토큰이 아직 캐시에 있을 때"로 한정한다 — 다른 갈래가 이미
+    // 재발급을 끝낸 뒤 뒤늦게 403 이 도착했는데 조건 없이 비우면, 갓 받아온 토큰을
+    // 버리고 불필요한 재발급이 갈래 수만큼 더 나간다(apiClient.csrf.test.ts 로 고정).
+    if (sent === csrfToken) csrfToken = null;
+    if ((await ensureCsrfToken()) !== sent) {
+      return request<T>(path, options, false);
+    }
   }
 
   if (!res.ok) {
