@@ -35,10 +35,12 @@ jobs:
         with:
           # 기본값 'some'(= 패턴 OR)이면 `'**'` 가 항상 매치해 `'!frontend/**'` 가 死문이
           # 된다 — 실제로 프론트 전용 PR(#110)에서 백엔드 잡 3개가 전부 돌았다(이슈 #111).
-          # 'some-with-excludes' = "긍정 패턴 하나 이상 매치 + 부정 패턴 하나도 매치 안 함".
-          # 주의: 부정 패턴만 남기면(`- '!frontend/**'` 단독) 공식 문서상 **아무것도 매치하지
-          # 않아** 백엔드 잡이 영구 skip 되고, ci-ok 는 skip=통과라 헛green 이 된다.
-          predicate-quantifier: 'some-with-excludes'
+          # 'every' = 모든 패턴을 만족해야 포함 → "전부 매치 AND frontend 아님".
+          # 주의 ①: 부정 패턴만 남기면(`- '!frontend/**'` 단독) 아무것도 매치하지 않아
+          #   백엔드 잡이 영구 skip 되고, ci-ok 는 skip=통과라 헛green 이 된다.
+          # 주의 ②: v3 가 받는 값은 'some'|'every' 뿐이다. master README 에 있는
+          #   'some-with-excludes' 는 v3 태그에 없어 잡이 즉시 실패한다(실측).
+          predicate-quantifier: 'every'
           filters: |
             backend:
               - '**'
