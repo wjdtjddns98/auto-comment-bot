@@ -150,6 +150,10 @@ export interface MatchedPost {
   published_at: string | null;
   matched_at: string;
   status: MatchedPostStatus;
+  // `new|reviewing → sending` 전이 시각(approve/retry 의 CAS 클레임이 찍는다, docs/API-SPEC.md §매칭).
+  // ⚠️ "지금 전송중" 표시로 쓰지 말 것 — 클레임이 풀린 뒤(replied/reviewing)에도 **마지막 시도
+  // 값이 남는다**. 현재 상태 판단은 `status` + `reply_actions` 후속 행으로. 승인 이력이 없으면 null.
+  sending_claimed_at: string | null;
 }
 
 export interface MatchListResponse {

@@ -179,6 +179,8 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-19T10:00:00Z",
     matched_at: "2026-07-19T10:05:00Z",
     status: "new",
+    // 아직 승인된 적 없는 매칭은 null(docs/API-SPEC.md §매칭).
+    sending_claimed_at: null,
   },
   {
     id: 2,
@@ -191,6 +193,8 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-19T11:00:00Z",
     matched_at: "2026-07-19T11:02:00Z",
     status: "reviewing",
+    // 전송 실패로 클레임이 풀린(reviewing 복귀) 뒤에도 마지막 시도 값은 남는다 — 실패 이력(11:30) 직전.
+    sending_claimed_at: "2026-07-19T11:29:00Z",
   },
   {
     id: 3,
@@ -203,6 +207,8 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-18T09:00:00Z",
     matched_at: "2026-07-18T09:10:00Z",
     status: "replied",
+    // 수동 복사(전송 불가) 소스도 approve 가 CAS 클레임을 거친다(backend/app/api/matches.py) — 값이 남는다.
+    sending_claimed_at: "2026-07-18T09:20:00Z",
   },
   {
     id: 4,
@@ -215,6 +221,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-17T14:00:00Z",
     matched_at: "2026-07-17T14:03:00Z",
     status: "ignored",
+    sending_claimed_at: null,
   },
   {
     id: 5,
@@ -228,6 +235,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: null,
     matched_at: "2026-07-20T08:00:00Z",
     status: "new",
+    sending_claimed_at: null,
   },
   {
     id: 6,
@@ -241,6 +249,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     matched_at: "2026-07-20T12:05:00Z",
     // 전송 결과 불명 — 자동 조정 대기(M2). 읽기 전용 뱃지 + ignore 만 활성 화면 재현용.
     status: "verify_pending",
+    sending_claimed_at: "2026-07-20T12:05:30Z",
   },
   {
     id: 7,
@@ -255,6 +264,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     // 조정(reconcile) 성공 확정 — verify_pending 에서 실 게시가 확인돼 replied 로 전이(M2 수용
     // 기준 "Threads 실발송→external_reply_id 기록", #28 조정 조회 흐름 최종 확인용).
     status: "replied",
+    sending_claimed_at: "2026-07-20T13:05:30Z",
   },
   {
     id: 8,
@@ -269,6 +279,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-21T10:00:00Z",
     matched_at: "2026-07-21T10:05:00Z",
     status: "new",
+    sending_claimed_at: null,
   },
   {
     id: 9,
@@ -283,6 +294,7 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     published_at: "2026-07-20T13:00:00Z",
     matched_at: "2026-07-21T09:05:00Z",
     status: "new",
+    sending_claimed_at: null,
   },
 ];
 
