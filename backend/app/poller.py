@@ -7,6 +7,7 @@
 import asyncio
 import hashlib
 import logging
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from tortoise.expressions import Q
@@ -72,8 +73,24 @@ async def poll_tick() -> None:
             logger.exception("소스 폴링 실패(미회계 경로) source=%s", source.id)
 
 
+@dataclass
+class PollResult:
+    """수집 1회 결과 — `posts` 는 어댑터가 반환한 글 전량(매칭 여부 무관), `stored` 는
+    저장 시도한 매칭 글 수(dedup 무시분 포함), `error` 는 실패 시 안전 요약(불변식 ③)."""
+
+    stored: int = 0
+    posts: list = field(default_factory=list)
+    error: str | None = None
+
+
 async def poll_source(source: Source) -> int:
     """소스 1개 수집. 저장 시도한 매칭 글 수를 반환(dedup 무시분 포함)."""
+    return (await poll_source_detailed(source)).stored
+
+
+async def poll_source_detailed(source: Source) -> PollResult:
+    """`poll_source` 와 회계가 동일하되 반환된 글·실패 요약까지 돌려준다 — 수동 검색
+    엔드포인트(`POST /api/sources/{id}/poll-now`)가 "검색 결과" 를 화면에 보여주는 용도."""
     adapter = get_adapter(source.type)
     # 폴링 시각을 먼저 커밋 — 이후 어떤 단계가 실패해도 poll_interval 은 지켜진다
     # (저장 실패가 매 tick 재요청 루프가 되던 경로 봉합 — 불변식 ④, 적대 리뷰 H4).
@@ -83,25 +100,23 @@ async def poll_source(source: Source) -> int:
         # 어댑터 미구현 타입이 "정상(ok)"으로 보이며 영구 skip 되지 않게 명시 회계.
         source.health_status = HealthStatus.down
         await source.save(update_fields=["health_status"])
-        return 0
+        return PollResult(error=f"지원되지 않는 소스 타입: {source.type.value}")
 
     try:
         posts = await adapter.fetch(source, source.last_success_at)
         stored = await _store_matches(source, posts)
     except RateLimitedError as exc:
+        error = _safe_source_error(exc)
         await _record_failure(
-            source, retry_after_sec=exc.retry_after_sec, rate_limited=True,
-            error=_safe_source_error(exc),
+            source, retry_after_sec=exc.retry_after_sec, rate_limited=True, error=error,
         )
-        return 0
+        return PollResult(error=error)
     except Exception as exc:
         # fetch 실패(FetchError)든 저장 실패든 동일하게 회계한다 — 커서 미전진 + health 반영.
         logger.exception("소스 수집/저장 실패 source=%s", source.id)
-        await _record_failure(
-            source, retry_after_sec=None, rate_limited=False,
-            error=_safe_source_error(exc),
-        )
-        return 0
+        error = _safe_source_error(exc)
+        await _record_failure(source, retry_after_sec=None, rate_limited=False, error=error)
+        return PollResult(error=error)
 
     # store 성공 → 커서 전진 + 상태 회복 (FR-5)
     _fail_counts.pop(source.id, None)
@@ -130,7 +145,7 @@ async def poll_source(source: Source) -> int:
             source.health_status = HealthStatus.ok
             source.last_error = None
             source.last_error_at = None
-    return stored
+    return PollResult(stored=stored, posts=list(posts))
 
 
 def _safe_source_error(exc: Exception) -> str:
