@@ -40,12 +40,15 @@ export class MockApiError extends Error {
   status: number;
   detail: string;
   action?: string;
+  // 실서버가 429 에 싣는 `Retry-After`(초) 헤더에 대응한다.
+  retryAfterSec?: number;
 
-  constructor(status: number, detail: string, action?: string) {
+  constructor(status: number, detail: string, action?: string, retryAfterSec?: number) {
     super(detail);
     this.status = status;
     this.detail = detail;
     this.action = action;
+    this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -446,37 +449,59 @@ function matchesAnyKeyword(sourceId: number, content: string): boolean {
     );
 }
 
+// 실서버의 표시용 상한과 같은 값(backend/app/api/sources.py `_POLL_NOW_MAX_POSTS`·
+// `_POLL_NOW_MAX_CONTENT`·`_POLL_NOW_MIN_INTERVAL_SEC`). 상한을 mock 에서도 재현해야
+// "50건 넘게 반환됐을 때 화면이 뭐라고 말하는지"를 백엔드 없이 확인할 수 있다.
+const POLL_NOW_MAX_POSTS = 50;
+const POLL_NOW_MAX_CONTENT = 1000;
+const POLL_NOW_MIN_INTERVAL_SEC = 10;
+
+/** 소스별 마지막 수집 시각(ms) — 실서버 `Source.last_polled_at` 자리. 쿨다운 판정에 쓴다. */
+const lastPolledAt = new Map<number, number>();
+
 /**
  * 수동 검색 — `POST /api/sources/{id}/poll-now`(docs/API-SPEC.md §소스, 백엔드 PR #117).
  *
  * 회계는 실서버와 같다: 성공하면 `last_success_at` 이 갱신되고 health 가 ok 로 회복되며 만료된
  * backoff 는 정리된다. `enabled=false` 소스도 허용한다 — 수동 검색은 주기 수집 on/off 와 별개다.
+ * 거절도 실서버 순서를 따른다: 진행 중(409) → 활성 backoff(429) → 쿨다운(429).
  */
 function handlePollNow(id: number): PollNowResponse {
   requireAdmin();
   const idx = sources.findIndex((s) => s.id === id);
   if (idx === -1) throw new MockApiError(404, "소스가 없습니다");
   const source = sources[idx];
-  // 활성 backoff 중이면 거절(불변식 ④) — 만료분은 아래에서 정리하고 검색은 그대로 진행한다.
-  if (source.backoff_until && new Date(source.backoff_until) > new Date()) {
-    throw new MockApiError(
-      429,
-      `소스가 rate-limit backoff 중입니다 — ${source.backoff_until} 이후 재시도`
+  const now = Date.now();
+
+  // 실서버는 소스 락으로 스케줄 틱과 직렬화한다. mock 에는 틱이 없으므로 쿨다운만 재현한다.
+  if (source.backoff_until && new Date(source.backoff_until).getTime() > now) {
+    throwRetryLater(new Date(source.backoff_until).getTime(), "소스가 rate-limit backoff 중입니다");
+  }
+  const lastPolled = lastPolledAt.get(id);
+  if (lastPolled !== undefined && lastPolled + POLL_NOW_MIN_INTERVAL_SEC * 1000 > now) {
+    throwRetryLater(
+      lastPolled + POLL_NOW_MIN_INTERVAL_SEC * 1000,
+      `직전 수집 후 ${POLL_NOW_MIN_INTERVAL_SEC}초 이내입니다`
     );
   }
+  lastPolledAt.set(id, now);
+
   const pool = MOCK_POLLED_POSTS[source.type];
   if (!pool) {
     throw new MockApiError(502, `검색 실패 — 지원되지 않는 소스 타입: ${source.type}`);
   }
 
-  const matched = pool.filter((p) => matchesAnyKeyword(id, p.content));
-  const now = new Date().toISOString();
-  for (const post of matched) {
+  const nowIso = new Date(now).toISOString();
+  let stored = 0;
+  for (const post of pool) {
+    if (!matchesAnyKeyword(id, post.content)) continue;
     // (source_id, external_post_id) unique + ignore_conflicts 와 같은 upsert-ignore dedup.
+    // `stored` 는 실제로 **새로 들어간** 행만 센다 — 재검색하면 0 이 되어야 한다.
     const duplicate = matchedPosts.some(
       (m) => m.source_id === id && m.external_post_id === post.external_post_id
     );
     if (duplicate) continue;
+    stored += 1;
     matchedPosts.push({
       id: nextId(matchedPosts),
       source_id: id,
@@ -486,7 +511,7 @@ function handlePollNow(id: number): PollNowResponse {
       content: post.content,
       matched_keyword_id: null,
       published_at: post.published_at,
-      matched_at: now,
+      matched_at: nowIso,
       status: "new",
       sending_claimed_at: null,
     });
@@ -494,10 +519,10 @@ function handlePollNow(id: number): PollNowResponse {
 
   // 레코드를 제자리에서 고치지 않고 새 객체로 갈아끼운다 — in-place 로 바꾸면 React Query 의
   // 구조적 공유가 캐시된 소스와 깊은 값이 같다고 보아 목록 리렌더가 누락된다.
-  const backoffExpired = source.backoff_until !== null && new Date(source.backoff_until) <= new Date();
+  const backoffExpired = source.backoff_until !== null && new Date(source.backoff_until) <= new Date(now);
   const updated: Source = {
     ...source,
-    last_success_at: now,
+    last_success_at: nowIso,
     health_status: "ok",
     backoff_until: backoffExpired ? null : source.backoff_until,
     last_error: null,
@@ -505,9 +530,21 @@ function handlePollNow(id: number): PollNowResponse {
   };
   sources[idx] = updated;
 
-  // `stored` 는 큐에 새로 들어간 수가 아니라 **키워드 일치 수**다(dedup 무시분 포함) —
-  // 실서버 `_store_matches` 의 반환값과 같은 정의로 맞춰 둔다.
-  return { source: updated, posts: [...pool], stored: matched.length };
+  return {
+    source: updated,
+    posts: pool.slice(0, POLL_NOW_MAX_POSTS).map((p) => ({
+      ...p,
+      content: p.content.slice(0, POLL_NOW_MAX_CONTENT),
+    })),
+    fetched: pool.length,
+    stored,
+  };
+}
+
+/** 실서버 `_raise_retry_later` 와 같은 모양 — 사유 + 남은 초를 detail 에 담고 헤더로도 준다. */
+function throwRetryLater(untilMs: number, reason: string): never {
+  const secs = Math.max(1, Math.ceil((untilMs - Date.now()) / 1000));
+  throw new MockApiError(429, `${reason} — ${secs}초 후 다시 시도해 주세요`, undefined, secs);
 }
 
 // ---- 키워드 (admin) ----

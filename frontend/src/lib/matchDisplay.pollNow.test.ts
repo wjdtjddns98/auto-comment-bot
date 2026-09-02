@@ -1,14 +1,14 @@
 /**
  * 수동 검색(`POST /api/sources/{id}/poll-now`) 결과 표시 헬퍼 — 이슈 #118.
  *
- * 특히 `describePollSummary` 는 문구 하나가 사실관계를 바꾸는 자리라 고정해 둔다.
- * 백엔드의 `stored` 는 **키워드에 일치한 글 수**이고 dedup 으로 무시된 중복분이 포함된다
- * (backend/app/poller.py `_store_matches` 는 `bulk_create(ignore_conflicts=True)` 에 넘긴
- * 행 수를 그대로 돌려준다). 같은 소스를 두 번 검색하면 두 번째도 같은 수가 오므로,
- * "검토 큐에 N건 추가" 로 적으면 아무것도 안 늘었는데 늘었다고 말하게 된다.
+ * 요약 문구는 두 숫자를 헷갈리면 바로 거짓말이 되는 자리라 고정해 둔다(계약: 이슈 #118
+ * 2026-09-02 갱신 코멘트 + `docs/API-SPEC.md` §소스).
+ * - 반환 수는 `fetched` 다. `posts` 는 표시용 상한(최대 50건)이 걸려 있어 목록 길이로 세면
+ *   50건 넘게 온 검색에서 "50건 반환"이라고 축소 보고하게 된다.
+ * - `stored` 는 검토 큐에 **새로** 저장된 건수라 재검색하면 0 이다.
  */
 import { describe, expect, it } from "vitest";
-import { describePollSummary, describeSourceTarget } from "./matchDisplay";
+import { describePollSummary, describePollTruncation, describeSourceTarget } from "./matchDisplay";
 import type { Source } from "../types/api";
 
 function makeSource(overrides: Partial<Source>): Source {
@@ -29,20 +29,33 @@ function makeSource(overrides: Partial<Source>): Source {
 }
 
 describe("describePollSummary", () => {
-  it("반환 건수와 키워드 일치 건수를 함께 보여준다", () => {
-    expect(describePollSummary(3, 1)).toBe("3건 반환 · 키워드 일치 1건");
-  });
-
-  it("'추가' 로 표현하지 않는다 — stored 는 dedup 무시분을 포함한 일치 수다", () => {
-    expect(describePollSummary(3, 1)).not.toContain("추가");
+  it("반환 건수와 검토 큐에 추가된 건수를 함께 보여준다", () => {
+    expect(describePollSummary(3, 1)).toBe("3건 반환 · 검토 큐에 1건 추가");
   });
 
   it("반환된 글이 없으면 건수를 나열하지 않고 빈 결과라고 말한다", () => {
     expect(describePollSummary(0, 0)).toBe("반환된 글 없음");
   });
 
-  it("반환은 있는데 일치가 0건인 경우도 그대로 드러낸다", () => {
-    expect(describePollSummary(2, 0)).toBe("2건 반환 · 키워드 일치 0건");
+  it("재검색이라 큐에 새로 들어간 게 없으면 0건 추가로 말한다", () => {
+    expect(describePollSummary(3, 0)).toBe("3건 반환 · 검토 큐에 0건 추가");
+  });
+
+  it("표시 상한을 넘긴 반환 수도 그대로 센다 — 목록 길이가 아니라 fetched 기준", () => {
+    expect(describePollSummary(120, 4)).toBe("120건 반환 · 검토 큐에 4건 추가");
+  });
+});
+
+describe("describePollTruncation", () => {
+  it("표시 상한에 걸린 경우에만 잘렸다고 알린다", () => {
+    expect(describePollTruncation(120, 50)).toBe(
+      "반환된 120건 중 상위 50건만 표시합니다(본문은 1,000자까지)."
+    );
+  });
+
+  it("전량이 보이면 굳이 말하지 않는다", () => {
+    expect(describePollTruncation(3, 3)).toBeNull();
+    expect(describePollTruncation(0, 0)).toBeNull();
   });
 });
 

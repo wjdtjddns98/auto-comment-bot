@@ -68,11 +68,12 @@ export interface PolledPost {
 export interface PollNowResponse {
   // 이번 수집으로 갱신된 소스(last_success_at·health_status·last_error).
   source: Source;
+  // ⚠️ **표시용 상한이 걸린 목록**이다 — 최대 50건, `content` 는 1,000자로 절단된다.
+  // 전량 개수는 `fetched` 이므로 "N건 반환"은 posts.length 가 아니라 fetched 로 적는다.
   posts: PolledPost[];
-  // ⚠️ "검토 큐에 새로 들어간 건수"가 아니라 **키워드에 일치한 글 수**다.
-  // 백엔드는 매칭된 행을 `bulk_create(ignore_conflicts=True)` 로 넣고 그 행 수를 세므로
-  // (backend/app/poller.py `_store_matches`), dedup 으로 무시된 중복분도 그대로 포함된다.
-  // 같은 소스를 두 번 검색하면 두 번째도 같은 수가 온다 — "N건 추가" 로 표기하지 말 것.
+  // 어댑터가 이번 호출에 반환한 글 전체 수(상한 적용 전).
+  fetched: number;
+  // 키워드 매칭·dedup 을 거쳐 검토 큐에 **새로** 저장된 건수 — 같은 글을 재검색하면 0 이다.
   stored: number;
 }
 

@@ -15,6 +15,7 @@ import {
   SOURCE_TYPE_IMPLEMENTED,
   SOURCE_TYPE_LABEL,
   describePollSummary,
+  describePollTruncation,
   describeSourceTarget,
   formatDateTime,
   getRssUrl,
@@ -180,6 +181,7 @@ function CreateSourceForm() {
 function PollResultModal({ result, onClose }: { result: PollNowResponse; onClose: () => void }) {
   // 응답에 담겨 온 소스를 쓴다 — 이번 검색으로 갱신된 값이라 목록 캐시보다 최신이다.
   const source = result.source;
+  const truncation = describePollTruncation(result.fetched, result.posts.length);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -212,8 +214,9 @@ function PollResultModal({ result, onClose }: { result: PollNowResponse; onClose
             {SOURCE_TYPE_LABEL[source.type] ?? source.type} · {describeSourceTarget(source)}
           </p>
           <p className="text-sm font-medium text-gray-900">
-            {describePollSummary(result.posts.length, result.stored)}
+            {describePollSummary(result.fetched, result.stored)}
           </p>
+          {truncation && <p className="text-xs text-gray-500">{truncation}</p>}
         </div>
 
         {result.posts.length === 0 ? (
@@ -276,6 +279,8 @@ function SourceRow({ source }: { source: Source }) {
   const [deleteBlocked, setDeleteBlocked] = useState(false);
   const [pollResult, setPollResult] = useState<PollNowResponse | null>(null);
   const [pollError, setPollError] = useState<string | null>(null);
+  // 429 의 Retry-After 만큼 남은 초. 0 이 되면 버튼이 다시 열린다.
+  const [retryAfterSec, setRetryAfterSec] = useState(0);
   const pollErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
   const isThreads = source.type === "threads";
@@ -328,10 +333,21 @@ function SourceRow({ source }: { source: Source }) {
       if (pollErrorTimeoutRef.current) clearTimeout(pollErrorTimeoutRef.current);
       setPollError(describeApiError(err));
       pollErrorTimeoutRef.current = setTimeout(() => setPollError(null), 5000);
+      // 429 는 "잠시 뒤에 되는" 실패다 — 서버가 알려준 시간만큼 버튼을 잠가 연타를 막는다
+      // (불변식 ④). 토스트는 5초 뒤 사라지므로 남은 시간은 버튼 라벨이 계속 보여준다.
+      if (err instanceof ApiError && err.status === 429 && err.retryAfterSec) {
+        setRetryAfterSec(err.retryAfterSec);
+      }
       // 502 는 실패해도 서버가 소스 health·last_error 를 갱신한다 — 행 배지를 맞춰준다.
       queryClient.invalidateQueries({ queryKey: ["sources"] });
     },
   });
+
+  useEffect(() => {
+    if (retryAfterSec <= 0) return;
+    const timer = setTimeout(() => setRetryAfterSec((sec) => Math.max(0, sec - 1)), 1000);
+    return () => clearTimeout(timer);
+  }, [retryAfterSec]);
 
   useEffect(() => {
     return () => {
@@ -485,10 +501,14 @@ function SourceRow({ source }: { source: Source }) {
                     어댑터가 없는 타입(naver_cafe)은 서버가 502 를 내므로 아예 막는다. */}
                 <Button
                   size="sm"
-                  disabled={!implemented || pollMutation.isPending}
+                  disabled={!implemented || pollMutation.isPending || retryAfterSec > 0}
                   onClick={() => pollMutation.mutate()}
                 >
-                  {pollMutation.isPending ? "검색 중…" : "지금 검색"}
+                  {pollMutation.isPending
+                    ? "검색 중…"
+                    : retryAfterSec > 0
+                      ? `${retryAfterSec}초 후 재시도`
+                      : "지금 검색"}
                 </Button>
                 <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
                   수정

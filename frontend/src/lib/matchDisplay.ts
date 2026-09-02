@@ -82,13 +82,24 @@ export function describeSourceTarget(source: Source): string {
 /**
  * 수동 검색 결과 요약 문구.
  *
- * `stored` 를 "검토 큐에 추가된 건수"로 쓰지 않는다 — 백엔드가 세는 값은 **키워드에 일치한
- * 글 수**이고 dedup 으로 무시된 중복분이 포함된다(types/api.ts `PollNowResponse.stored` 주석).
- * 같은 소스를 두 번 검색하면 두 번째도 같은 수가 오므로 "추가" 로 적으면 사실과 어긋난다.
+ * 반환 수는 `posts.length` 가 아니라 `fetched` 로 센다 — `posts` 에는 표시용 상한(최대 50건)이
+ * 걸려 있어서 목록 길이로는 실제로 몇 건이 왔는지 말할 수 없다. `stored` 는 검토 큐에 **새로**
+ * 저장된 건수라 재검색하면 0 이 온다(docs/API-SPEC.md §소스, 백엔드 PR #117 두 번째 커밋).
  */
-export function describePollSummary(returned: number, matched: number): string {
-  if (returned === 0) return "반환된 글 없음";
-  return `${returned}건 반환 · 키워드 일치 ${matched}건`;
+export function describePollSummary(fetched: number, stored: number): string {
+  if (fetched === 0) return "반환된 글 없음";
+  return `${fetched}건 반환 · 검토 큐에 ${stored}건 추가`;
+}
+
+/**
+ * 표시용 상한에 걸려 잘린 경우에만 알려주는 보조 문구.
+ *
+ * 목록에 50건만 보이는데 요약은 "120건 반환"이라고 하면 화면이 스스로 모순돼 보인다.
+ * 잘리지 않았으면 null — 굳이 말할 것이 없다.
+ */
+export function describePollTruncation(fetched: number, shown: number): string | null {
+  if (shown >= fetched) return null;
+  return `반환된 ${fetched}건 중 상위 ${shown}건만 표시합니다(본문은 1,000자까지).`;
 }
 
 // Threads 플랫폼 실 상한(API 의 final_body 상한은 2000자지만 전송 시 500자 초과는 502 확정 실패) — 이슈 #30.
