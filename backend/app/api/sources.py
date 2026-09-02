@@ -6,7 +6,7 @@
 config_model(`extra="forbid"`)로 키가 고정돼 있어(rss_url / query·sns_account_id)
 자격증명이 실릴 수 없다 — 불변식 ③ 저촉 없음. 토큰은 sns_account_secrets 전용.
 """
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -50,6 +50,33 @@ class SourceOut(BaseModel):
     # 수집이 성공하면 서버가 비운다. 자격증명은 담기지 않는다(불변식 ③).
     last_error: str | None
     last_error_at: datetime | None
+
+
+class PolledPost(BaseModel):
+    """수동 검색이 소스에서 돌려받은 글 1건(매칭 여부와 무관한 원본 반환값)."""
+
+    external_post_id: str
+    author: str | None
+    url: str | None
+    content: str
+    published_at: datetime | None
+
+
+class PollNowOut(BaseModel):
+    source: SourceOut
+    # 어댑터가 이번 호출에 반환한 글 — "검색이 앱 안에서 실행되고 결과가 표시된다" 를 화면이
+    # 보여주기 위한 필드. 표시용이라 상위 _POLL_NOW_MAX_POSTS 건·본문 _POLL_NOW_MAX_CONTENT 자로
+    # 자른다(RSS 는 최대 500건×20k자라 무제한이면 수십 MB). 전체 반환 수는 `fetched`.
+    posts: list[PolledPost]
+    fetched: int
+    # 키워드 매칭·dedup 을 거쳐 검토 큐에 **새로** 저장된 건수.
+    stored: int
+
+
+_POLL_NOW_MAX_POSTS = 50
+_POLL_NOW_MAX_CONTENT = 1000
+# 수동 검색 최소 간격 — 스케줄 하한(60초)을 우회하는 경로이므로 연타를 막는다(불변식 ④).
+_POLL_NOW_MIN_INTERVAL_SEC = 10
 
 
 def _clean_name(v: str | None) -> str | None:
@@ -143,6 +170,63 @@ async def update_source(source_id: int, body: SourcePatch) -> SourceOut:
     if s is None:
         raise HTTPException(status_code=404, detail="소스가 없습니다")
     return SourceOut.model_validate(s)
+
+
+@router.post(
+    "/{source_id}/poll-now", dependencies=[Depends(require_admin), Depends(require_csrf)]
+)
+async def poll_now(source_id: int) -> PollNowOut:
+    """수동 검색 — 스케줄 주기와 무관하게 이 소스를 지금 1회 수집하고 반환된 글을 돌려준다.
+
+    회계는 스케줄 폴링(`poller.poll_source`)과 동일하다(last_polled_at·커서·health·last_error).
+    `enabled=false` 소스도 허용한다 — 수동 검색은 주기 수집을 켜는 것과 별개의 동작이다.
+    예의 있는 수집(불변식 ④): 활성 backoff 중·직전 수집 후 최소 간격 미경과·이번 호출이 429 를
+    맞은 경우 모두 429(+Retry-After) 로 거절하고, 같은 소스의 동시 수집(스케줄 틱 포함)은 소스
+    락으로 막아 409 를 낸다. 그 외 수집 실패는 502 + 안전 요약(어댑터 통제 텍스트, 불변식 ③).
+    """
+    s = await Source.get_or_none(id=source_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="소스가 없습니다")
+    # 진행 중(스케줄 틱 포함)이 가장 구체적인 상태라 먼저 본다 — 틱이 last_polled_at 을
+    # 선커밋하므로 쿨다운을 먼저 보면 409 대신 429 가 나가 FE 메시지가 어긋난다.
+    if poller.source_lock(source_id).locked():
+        raise HTTPException(status_code=409, detail="이 소스의 수집이 이미 진행 중입니다")
+    now = datetime.now(UTC)
+    if s.backoff_until and s.backoff_until > now:
+        _raise_retry_later(s.backoff_until, "소스가 rate-limit backoff 중입니다")
+    cooldown = timedelta(seconds=_POLL_NOW_MIN_INTERVAL_SEC)
+    if s.last_polled_at and s.last_polled_at + cooldown > now:
+        _raise_retry_later(
+            s.last_polled_at + cooldown, f"직전 수집 후 {_POLL_NOW_MIN_INTERVAL_SEC}초 이내입니다"
+        )
+    # 락 검사 이후 여기까지 await 가 없으므로(단일 루프) 검사 결과가 그대로 유효하다.
+    result = await poller.poll_source_detailed(s)
+    if result.rate_limited:
+        _raise_retry_later(s.backoff_until, "검색이 rate-limit 에 걸렸습니다")
+    if result.error is not None:
+        raise HTTPException(status_code=502, detail=f"검색 실패 — {result.error}")
+    # `s` 는 poll_source_detailed 가 in-place 로 갱신했다(last_success_at·health 등) — 재조회 없음.
+    return PollNowOut(
+        source=SourceOut.model_validate(s),
+        posts=[
+            PolledPost(
+                external_post_id=p.external_post_id, author=p.author, url=p.url,
+                content=p.content[:_POLL_NOW_MAX_CONTENT], published_at=p.published_at,
+            )
+            for p in result.posts[:_POLL_NOW_MAX_POSTS]
+        ],
+        fetched=len(result.posts),
+        stored=result.stored,
+    )
+
+
+def _raise_retry_later(until: datetime | None, reason: str) -> None:
+    secs = max(1, int((until - datetime.now(UTC)).total_seconds())) if until else 60
+    raise HTTPException(
+        status_code=429,
+        detail=f"{reason} — {secs}초 후 다시 시도해 주세요",
+        headers={"Retry-After": str(secs)},
+    )
 
 
 @router.delete(
