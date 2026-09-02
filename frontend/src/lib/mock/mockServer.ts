@@ -13,6 +13,7 @@ import type {
   MatchedPost,
   MatchedPostStatus,
   PatchUserRequest,
+  PollNowResponse,
   RenderTemplateItem,
   RenderTemplateRequest,
   RenderTemplateResponse,
@@ -26,6 +27,7 @@ import type {
 import {
   MOCK_KEYWORDS,
   MOCK_MATCHED_POSTS,
+  MOCK_POLLED_POSTS,
   MOCK_REPLY_ACTIONS,
   MOCK_SNS_ACCOUNTS,
   MOCK_SOURCES,
@@ -433,6 +435,79 @@ function handleDeleteSource(id: number): void {
   // 전역 키워드(source_scope === null)는 무관 — 이 소스를 범위로 지정한 것만 지운다.
   removeWhere(keywords, (k) => k.source_scope === id);
   sources.splice(idx, 1);
+}
+
+/** 이 소스에 적용되는 키워드(전역 + 해당 소스 스코프)에 본문이 걸리는지 — 백엔드 매칭의 축약판. */
+function matchesAnyKeyword(sourceId: number, content: string): boolean {
+  return keywords
+    .filter((k) => k.enabled && (k.source_scope === null || k.source_scope === sourceId))
+    .some((k) =>
+      k.match_type === "regex" ? new RegExp(k.pattern).test(content) : content.includes(k.pattern)
+    );
+}
+
+/**
+ * 수동 검색 — `POST /api/sources/{id}/poll-now`(docs/API-SPEC.md §소스, 백엔드 PR #117).
+ *
+ * 회계는 실서버와 같다: 성공하면 `last_success_at` 이 갱신되고 health 가 ok 로 회복되며 만료된
+ * backoff 는 정리된다. `enabled=false` 소스도 허용한다 — 수동 검색은 주기 수집 on/off 와 별개다.
+ */
+function handlePollNow(id: number): PollNowResponse {
+  requireAdmin();
+  const idx = sources.findIndex((s) => s.id === id);
+  if (idx === -1) throw new MockApiError(404, "소스가 없습니다");
+  const source = sources[idx];
+  // 활성 backoff 중이면 거절(불변식 ④) — 만료분은 아래에서 정리하고 검색은 그대로 진행한다.
+  if (source.backoff_until && new Date(source.backoff_until) > new Date()) {
+    throw new MockApiError(
+      429,
+      `소스가 rate-limit backoff 중입니다 — ${source.backoff_until} 이후 재시도`
+    );
+  }
+  const pool = MOCK_POLLED_POSTS[source.type];
+  if (!pool) {
+    throw new MockApiError(502, `검색 실패 — 지원되지 않는 소스 타입: ${source.type}`);
+  }
+
+  const matched = pool.filter((p) => matchesAnyKeyword(id, p.content));
+  const now = new Date().toISOString();
+  for (const post of matched) {
+    // (source_id, external_post_id) unique + ignore_conflicts 와 같은 upsert-ignore dedup.
+    const duplicate = matchedPosts.some(
+      (m) => m.source_id === id && m.external_post_id === post.external_post_id
+    );
+    if (duplicate) continue;
+    matchedPosts.push({
+      id: nextId(matchedPosts),
+      source_id: id,
+      external_post_id: post.external_post_id,
+      author: post.author,
+      url: post.url,
+      content: post.content,
+      matched_keyword_id: null,
+      published_at: post.published_at,
+      matched_at: now,
+      status: "new",
+      sending_claimed_at: null,
+    });
+  }
+
+  // 레코드를 제자리에서 고치지 않고 새 객체로 갈아끼운다 — in-place 로 바꾸면 React Query 의
+  // 구조적 공유가 캐시된 소스와 깊은 값이 같다고 보아 목록 리렌더가 누락된다.
+  const backoffExpired = source.backoff_until !== null && new Date(source.backoff_until) <= new Date();
+  const updated: Source = {
+    ...source,
+    last_success_at: now,
+    health_status: "ok",
+    backoff_until: backoffExpired ? null : source.backoff_until,
+    last_error: null,
+    last_error_at: null,
+  };
+  sources[idx] = updated;
+
+  // `stored` 는 큐에 새로 들어간 수가 아니라 **키워드 일치 수**다(dedup 무시분 포함) —
+  // 실서버 `_store_matches` 의 반환값과 같은 정의로 맞춰 둔다.
+  return { source: updated, posts: [...pool], stored: matched.length };
 }
 
 // ---- 키워드 (admin) ----
@@ -869,6 +944,11 @@ const ROUTES: Array<{ method: string; pattern: RegExp; handler: Handler }> = [
     method: "PATCH",
     pattern: /^\/api\/sources\/(?<id>\d+)$/,
     handler: (p, _q, body) => handlePatchSource(Number(p.id), body),
+  },
+  {
+    method: "POST",
+    pattern: /^\/api\/sources\/(?<id>\d+)\/poll-now$/,
+    handler: (p) => handlePollNow(Number(p.id)),
   },
   {
     method: "DELETE",

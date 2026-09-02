@@ -4,9 +4,11 @@
 import type {
   Keyword,
   MatchedPost,
+  PolledPost,
   ReplyAction,
   SnsAccount,
   Source,
+  SourceType,
   Template,
   User,
 } from "../../types/api";
@@ -116,6 +118,60 @@ export const MOCK_SOURCES: Source[] = [
     last_error_at: null,
   },
 ];
+
+/**
+ * 수동 검색(`POST /api/sources/{id}/poll-now`)이 돌려주는 글 — 모의 어댑터의 반환값이다.
+ *
+ * 소스 **타입별로 고정**이고 호출할 때마다 같은 글을 준다. 실제 검색도 검색어가 같으면 결과가
+ * 같으므로, 두 번째 검색에서 dedup 때문에 검토 큐가 늘지 않는 동작이 mock QA 에서 그대로
+ * 재현된다(그럼에도 `stored` 는 같은 수가 온다 — 백엔드가 "키워드 일치 수"를 세기 때문).
+ *
+ * `naver_cafe` 키가 없는 건 의도적이다 — 어댑터 미구현이라 실서버는 502
+ * (`검색 실패 — 지원되지 않는 소스 타입: naver_cafe`)를 낸다. mock 도 같은 502 를 낸다.
+ */
+export const MOCK_POLLED_POSTS: Partial<Record<SourceType, PolledPost[]>> = {
+  threads: [
+    {
+      external_post_id: "th_2001",
+      author: "dogmom_lee",
+      url: "https://www.threads.com/@dogmom_lee/post/2001",
+      content: "3살 포메 강아지 간식 추천 좀요. 살찌지 않는 걸로 찾고 있어요",
+      published_at: "2026-09-01T12:34:56Z",
+    },
+    {
+      external_post_id: "th_2002",
+      author: "prayforyou_x",
+      url: "https://www.threads.com/@prayforyou_x/post/2002",
+      content: "우리집 댕댕이 강아지 간식 하루에 몇 개까지 줘도 되나요? 급여량 기준이 궁금합니다",
+      published_at: "2026-09-01T11:02:10Z",
+    },
+    {
+      // 키워드에 걸리지 않는 글 — "반환은 됐지만 큐에는 안 들어간다" 를 화면에서 확인하는 픽스처.
+      external_post_id: "th_2003",
+      author: "cafe_hopper",
+      url: "https://www.threads.com/@cafe_hopper/post/2003",
+      content: "오늘 날씨 좋아서 한강 다녀왔어요 ☀️",
+      published_at: "2026-09-01T09:15:00Z",
+    },
+  ],
+  community: [
+    {
+      external_post_id: "rss_3001",
+      author: null,
+      url: "https://example-petcommunity.com/board/3001",
+      // RSS description 원문처럼 마크업이 섞인 값 — 목록이 toPlainText 로 정규화하는지 본다.
+      content: "<p>강아지 간식 자율급식 하시는 분 계신가요? <a href='https://example.com'>관련 글</a></p>",
+      published_at: "2026-09-01T08:00:00Z",
+    },
+    {
+      external_post_id: "rss_3002",
+      author: null,
+      url: "https://example-petcommunity.com/board/3002",
+      content: "중형견 산책 코스 공유합니다",
+      published_at: null,
+    },
+  ],
+};
 
 export const MOCK_KEYWORDS: Keyword[] = [
   { id: 1, pattern: "강아지 간식", match_type: "substring", enabled: true, source_scope: null },

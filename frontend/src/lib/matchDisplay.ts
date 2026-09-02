@@ -60,6 +60,37 @@ export function getSourceDisplayName(source: Source): string {
   return `#${source.id}`;
 }
 
+/**
+ * 수동 검색(`POST /api/sources/{id}/poll-now`)이 무엇을 대상으로 했는지 한 줄로.
+ *
+ * 결과 패널 머리에 놓아 "이 검색어로 검색했다"를 화면에 남기기 위한 값이다 — 앱 검수(Threads
+ * `threads_keyword_search`)가 요구하는 "keyword search within your app" 장면이 소스 설정
+ * 화면과 결과 목록으로 흩어지지 않게 한다(이슈 #118).
+ */
+export function describeSourceTarget(source: Source): string {
+  if (source.type === "threads") {
+    const query = getThreadsQuery(source.config);
+    return query ? `검색어 "${query}"` : "검색어 미설정";
+  }
+  if (source.type === "community") {
+    const url = getRssUrl(source.config);
+    return url ? `피드 ${url}` : "피드 URL 미설정";
+  }
+  return `소스 #${source.id}`;
+}
+
+/**
+ * 수동 검색 결과 요약 문구.
+ *
+ * `stored` 를 "검토 큐에 추가된 건수"로 쓰지 않는다 — 백엔드가 세는 값은 **키워드에 일치한
+ * 글 수**이고 dedup 으로 무시된 중복분이 포함된다(types/api.ts `PollNowResponse.stored` 주석).
+ * 같은 소스를 두 번 검색하면 두 번째도 같은 수가 오므로 "추가" 로 적으면 사실과 어긋난다.
+ */
+export function describePollSummary(returned: number, matched: number): string {
+  if (returned === 0) return "반환된 글 없음";
+  return `${returned}건 반환 · 키워드 일치 ${matched}건`;
+}
+
 // Threads 플랫폼 실 상한(API 의 final_body 상한은 2000자지만 전송 시 500자 초과는 502 확정 실패) — 이슈 #30.
 export const THREADS_BODY_LIMIT = 500;
 

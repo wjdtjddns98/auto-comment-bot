@@ -1,10 +1,21 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ApiError, createSource, deleteSource, getSnsAccounts, getSources, patchSource } from "../lib/apiClient";
+import {
+  ApiError,
+  createSource,
+  deleteSource,
+  getSnsAccounts,
+  getSources,
+  patchSource,
+  pollSourceNow,
+} from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
 import {
   SOURCE_TYPE_IMPLEMENTED,
   SOURCE_TYPE_LABEL,
+  describePollSummary,
+  describeSourceTarget,
   formatDateTime,
   getRssUrl,
   getSourceDisplayName,
@@ -12,13 +23,15 @@ import {
   getThreadsQuery,
   HEALTH_TONE,
   sourceErrorTitle,
+  toPlainText,
 } from "../lib/matchDisplay";
-import type { Source, SourceType } from "../types/api";
+import type { PollNowResponse, Source, SourceType } from "../types/api";
 import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Card } from "../components/ui/Card";
 import { Field, Input, Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
+import { Toast } from "../components/ui/Toast";
 
 const SOURCE_TYPES: SourceType[] = ["threads", "naver_cafe", "community"];
 
@@ -157,6 +170,97 @@ function CreateSourceForm() {
   );
 }
 
+/**
+ * 수동 검색 결과 패널(이슈 #118).
+ *
+ * 앱 검수(Threads `threads_keyword_search`)가 요구하는 "검색이 앱 안에서 실행되고 반환된 글이
+ * 표시된다"를 한 화면에 담는다 — 그래서 무엇으로 검색했는지(머리말)와 반환된 글 목록을 함께 둔다.
+ * 여기 목록은 **어댑터 반환값 전량**이라 키워드에 걸리지 않은 글도 포함된다(검토 큐와 다름).
+ */
+function PollResultModal({ result, onClose }: { result: PollNowResponse; onClose: () => void }) {
+  // 응답에 담겨 온 소스를 쓴다 — 이번 검색으로 갱신된 값이라 목록 캐시보다 최신이다.
+  const source = result.source;
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // 열릴 때 포커스를 패널로 옮긴다 — Esc 로 닫는 흐름과 스크린리더 진입점을 함께 준다.
+    dialogRef.current?.focus();
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        ref={dialogRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label="검색 결과"
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col gap-4 overflow-y-auto rounded-lg bg-white p-6 shadow-xl outline-none"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex flex-col gap-1">
+          <h2 className="text-base font-semibold text-gray-900">검색 결과</h2>
+          <p className="break-all text-sm text-gray-500">
+            {SOURCE_TYPE_LABEL[source.type] ?? source.type} · {describeSourceTarget(source)}
+          </p>
+          <p className="text-sm font-medium text-gray-900">
+            {describePollSummary(result.posts.length, result.stored)}
+          </p>
+        </div>
+
+        {result.posts.length === 0 ? (
+          <p className="py-8 text-center text-sm text-gray-400">반환된 글 없음</p>
+        ) : (
+          <ul className="flex flex-col gap-3">
+            {result.posts.map((post) => (
+              <li
+                key={post.external_post_id}
+                className="flex flex-col gap-1 rounded-md border border-gray-200 p-3"
+              >
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                  <span className="font-medium text-gray-700">{post.author || "작성자 미상"}</span>
+                  <span>{formatDateTime(post.published_at)}</span>
+                  {post.url && (
+                    <a
+                      href={post.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-brand-600 underline"
+                    >
+                      원문 보기
+                    </a>
+                  )}
+                </div>
+                <p className="whitespace-pre-wrap break-words text-sm text-gray-900">
+                  {toPlainText(post.content)}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="flex items-center justify-between gap-2">
+          {/* 검수 영상에서 "이 데이터가 어떻게 쓰이는지" 로 이어지는 동선 — 검토 큐(대시보드). */}
+          <Link to="/" className="text-sm text-brand-600 underline">
+            검토 큐로 이동
+          </Link>
+          <Button variant="secondary" onClick={onClose}>
+            닫기
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SourceRow({ source }: { source: Source }) {
   const queryClient = useQueryClient();
   const { data: snsAccounts } = useQuery({ queryKey: ["snsAccounts"], queryFn: getSnsAccounts });
@@ -170,6 +274,9 @@ function SourceRow({ source }: { source: Source }) {
   );
   const [error, setError] = useState<string | null>(null);
   const [deleteBlocked, setDeleteBlocked] = useState(false);
+  const [pollResult, setPollResult] = useState<PollNowResponse | null>(null);
+  const [pollError, setPollError] = useState<string | null>(null);
+  const pollErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
   const isThreads = source.type === "threads";
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
@@ -206,6 +313,32 @@ function SourceRow({ source }: { source: Source }) {
     },
   });
 
+  // 수동 검색(이슈 #118). 실패는 서버 detail 을 그대로 토스트로 띄운다 — 429(backoff 중)·
+  // 409(같은 소스 검색 진행 중)·502(수집 실패)는 각각 다음 행동이 달라서 뭉개면 안 된다.
+  const pollMutation = useMutation({
+    mutationFn: () => pollSourceNow(source.id),
+    onSuccess: (result) => {
+      setPollError(null);
+      setPollResult(result);
+      // 소스 행의 health·최근 수집 배지와 대시보드 검토 큐가 바로 갱신되게 한다.
+      queryClient.invalidateQueries({ queryKey: ["sources"] });
+      queryClient.invalidateQueries({ queryKey: ["matches"] });
+    },
+    onError: (err) => {
+      if (pollErrorTimeoutRef.current) clearTimeout(pollErrorTimeoutRef.current);
+      setPollError(describeApiError(err));
+      pollErrorTimeoutRef.current = setTimeout(() => setPollError(null), 5000);
+      // 502 는 실패해도 서버가 소스 health·last_error 를 갱신한다 — 행 배지를 맞춰준다.
+      queryClient.invalidateQueries({ queryKey: ["sources"] });
+    },
+  });
+
+  useEffect(() => {
+    return () => {
+      if (pollErrorTimeoutRef.current) clearTimeout(pollErrorTimeoutRef.current);
+    };
+  }, []);
+
   function handleSave() {
     const body: Parameters<typeof patchSource>[1] = {
       poll_interval_sec: pollIntervalSec,
@@ -237,7 +370,10 @@ function SourceRow({ source }: { source: Source }) {
     <>
       <Tr className="hover:bg-gray-50 align-top">
         <Td>{SOURCE_TYPE_LABEL[source.type] ?? source.type}</Td>
-        <Td className="max-w-xs">
+        {/* 이름은 이 표에서 유일하게 줄바꿈되는 칸이라, 폭이 모자라면 여기만 쥐어짜인다
+            (버튼이 하나 늘어난 뒤 한 글자씩 세로로 쪼개졌다). 최소 폭을 줘서, 좁은 화면에서는
+            칸을 쥐어짜는 대신 Table 래퍼의 가로 스크롤(overflow-x-auto)로 넘긴다. */}
+        <Td className="min-w-[7rem] max-w-xs">
           {editing ? (
             <Input
               type="text"
@@ -345,6 +481,15 @@ function SourceRow({ source }: { source: Source }) {
               </>
             ) : (
               <>
+                {/* 앱 검수용 수동 검색(이슈 #118) — 주기 수집과 무관하게 지금 1회 검색한다.
+                    어댑터가 없는 타입(naver_cafe)은 서버가 502 를 내므로 아예 막는다. */}
+                <Button
+                  size="sm"
+                  disabled={!implemented || pollMutation.isPending}
+                  onClick={() => pollMutation.mutate()}
+                >
+                  {pollMutation.isPending ? "검색 중…" : "지금 검색"}
+                </Button>
                 <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
                   수정
                 </Button>
@@ -361,6 +506,18 @@ function SourceRow({ source }: { source: Source }) {
           </div>
         </Td>
       </Tr>
+      {/* 모달·토스트는 fixed 라 화면에서는 표 밖에 뜨지만, DOM 상으로는 tbody 안이라
+          빈 셀(p-0)에 담아 표 구조를 깨지 않게 한다. */}
+      {(pollResult || pollError) && (
+        <Tr>
+          <Td colSpan={8} className="p-0">
+            {pollResult && (
+              <PollResultModal result={pollResult} onClose={() => setPollResult(null)} />
+            )}
+            {pollError && <Toast message={pollError} tone="danger" />}
+          </Td>
+        </Tr>
+      )}
       {error && (
         <Tr>
           <Td colSpan={8} className="text-sm text-tone-danger">

@@ -54,6 +54,28 @@ export interface PatchSourceRequest {
   config?: Record<string, unknown>;
 }
 
+// --- 수동 검색 (POST /api/sources/{id}/poll-now, admin) ---
+// 어댑터가 이번 호출에 반환한 글 1건. 키워드 매칭 여부와 무관한 **원본 반환값**이라
+// MatchedPost 와 달리 id·status·matched_keyword_id 가 없다 — 검토 큐 항목이 아니다.
+export interface PolledPost {
+  external_post_id: string;
+  author: string | null;
+  url: string | null;
+  content: string;
+  published_at: string | null;
+}
+
+export interface PollNowResponse {
+  // 이번 수집으로 갱신된 소스(last_success_at·health_status·last_error).
+  source: Source;
+  posts: PolledPost[];
+  // ⚠️ "검토 큐에 새로 들어간 건수"가 아니라 **키워드에 일치한 글 수**다.
+  // 백엔드는 매칭된 행을 `bulk_create(ignore_conflicts=True)` 로 넣고 그 행 수를 세므로
+  // (backend/app/poller.py `_store_matches`), dedup 으로 무시된 중복분도 그대로 포함된다.
+  // 같은 소스를 두 번 검색하면 두 번째도 같은 수가 온다 — "N건 추가" 로 표기하지 말 것.
+  stored: number;
+}
+
 export type MatchType = "substring" | "regex";
 
 export interface Keyword {

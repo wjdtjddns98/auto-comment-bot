@@ -16,6 +16,7 @@ import type {
   PatchSourceRequest,
   PatchTemplateRequest,
   PatchUserRequest,
+  PollNowResponse,
   RenderTemplateRequest,
   RenderTemplateResponse,
   ReplyAction,
@@ -221,6 +222,11 @@ export const patchSource = (id: number, body: PatchSourceRequest) =>
   request<Source>(`/api/sources/${id}`, { method: "PATCH", body });
 export const deleteSource = (id: number) =>
   request<void>(`/api/sources/${id}`, { method: "DELETE" });
+// 수동 검색 — 스케줄 주기와 무관하게 이 소스를 지금 1회 수집하고 반환된 글을 돌려준다.
+// `enabled=false` 소스도 호출 가능하다(주기 수집 on/off 와 별개). 오류는 detail 을 그대로
+// 보여준다: 429(활성 backoff 중) · 409(같은 소스 검색이 이미 진행 중) · 502(수집 실패).
+export const pollSourceNow = (id: number) =>
+  request<PollNowResponse>(`/api/sources/${id}/poll-now`, { method: "POST" });
 
 export const getKeywords = () => request<Keyword[]>("/api/keywords");
 export const createKeyword = (body: CreateKeywordRequest) =>
