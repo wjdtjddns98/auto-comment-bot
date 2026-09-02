@@ -112,19 +112,25 @@ Req `{ name?: string(≤100), type: "threads|naver_cafe|community", config: {...
 Req(부분) `{ name?, enabled?, poll_interval_sec?, config? }` → 200. `config` 는 위 타입별 스키마로 검증(422). `name: null` = 이름 제거.
 `enabled: true` 재활성화 시에는 저장된 config 도 재검증한다 — 무효 config 소스를 그대로 켤 수 없다(422).
 
-### `POST /api/sources/{id}/poll-now` (admin, CSRF) — 수동 검색 *(신규, [FE 공유])*
-→ 200 `{ source: <GET /api/sources 항목과 동일>, posts: [{ external_post_id, author, url, content, published_at }], stored: int }`
+### `POST /api/sources/{id}/poll-now` (admin, CSRF) — 수동 검색 *(신규, [FE 공유] #118)*
+→ 200 `{ source: <GET /api/sources 항목과 동일>, posts: [{ external_post_id, author, url, content, published_at }], fetched: int, stored: int }`
 
-> 스케줄 주기와 무관하게 **이 소스를 지금 1회 수집**하고, 어댑터가 **반환한 글 전량**(`posts`,
-> 키워드 매칭 여부 무관)과 그중 매칭·dedup 을 거쳐 검토 큐에 저장된 건수(`stored`)를 돌려준다.
-> 목적: "검색어 입력 → [지금 검색] → 반환된 글 표시 → 검토 큐로 이동" 이 **한 화면에서 보이게**
-> (앱 검수 요건 — 검색이 앱 안에서 실행되고 결과가 표시되는 장면). 회계(`last_success_at`·
-> `health_status`·`last_error`)는 스케줄 폴링과 동일하며 응답의 `source` 가 갱신된 값이다.
-> - `enabled=false` 소스도 허용(수동 검색은 주기 수집 on/off 와 별개).
-> - **429** `{ detail }`: 소스가 rate-limit backoff 중(불변식 ④ — `backoff_until` 이후 재시도).
-> - **409**: 같은 소스의 검색이 이미 진행 중(더블클릭).
-> - **502** `{ detail: "검색 실패 — <안전 요약>" }`: 수집 실패. 요약은 `last_error` 와 같은 텍스트
->   (자격증명 없음, 불변식 ③). 이때도 소스 health/last_error 는 갱신돼 있다.
+> 스케줄 주기와 무관하게 **이 소스를 지금 1회 수집**하고 결과를 돌려준다. 목적: "검색어 →
+> [지금 검색] → 반환된 글 표시 → 검토 큐로 이동" 이 **한 화면에서 보이게**(앱 검수 요건 —
+> 검색이 앱 안에서 실행되고 결과가 표시되는 장면). 회계(`last_success_at`·`health_status`·
+> `last_error`)는 스케줄 폴링과 동일하며 응답의 `source` 가 갱신된 값이다.
+> - `posts`: 어댑터가 반환한 글(키워드 매칭 여부 무관). **표시용 상한** — 최대 50건, `content` 는
+>   1,000자로 절단. 전체 반환 수는 `fetched`. `content`·`author` 는 제3자 원문이므로 렌더 시
+>   이스케이프 필수(dangerouslySetInnerHTML 금지).
+> - `stored`: 키워드 매칭·dedup 을 거쳐 검토 큐에 **새로** 저장된 건수(같은 글 재검색 시 0).
+> - `enabled=false` 소스도 허용(수동 검색은 주기 수집 on/off 와 별개). 이때도 매칭 글은 큐에 실제로
+>   쌓이고 커서·health 가 갱신된다.
+> - **429** `{ detail }` + `Retry-After`(초): ⓐ 소스가 rate-limit backoff 중 ⓑ 직전 수집(스케줄
+>   포함) 후 **10초** 이내 ⓒ 이번 검색이 업스트림 429/403 을 맞음(backoff 새로 걸림). `detail` 에
+>   사유와 대기 초가 들어 있으니 토스트로 그대로 노출.
+> - **409**: 같은 소스의 수집이 지금 진행 중(스케줄 틱 또는 다른 수동 검색).
+> - **502** `{ detail: "검색 실패 — <안전 요약>" }`: 그 외 수집 실패. 요약은 `last_error` 와 같은
+>   텍스트(자격증명 없음, 불변식 ③). 이때도 소스 health/last_error 는 갱신돼 있다.
 > - 404: 소스 없음. 개발 모드 Threads 는 테스터 본인 글만 반환된다(Meta 제약).
 
 ### `DELETE /api/sources/{id}` → 204.

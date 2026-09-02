@@ -38,6 +38,10 @@ state: dict = {"last_tick": None}  # /health poller heartbeat (FR-17)
 # 워커) — 재시작으로 리셋되면 다음 조정 틱(60초)까지 poll 성공이 ok 로 되돌리는 1회성
 # 깜빡임이 있을 수 있다(재시작 이벤트 한정, 허용).
 _reconcile_failing: set[int] = set()
+# 소스별 수집 락 — 스케줄 틱과 수동 검색(POST /poll-now)이 같은 소스에 동시 fetch 를 내지
+# 않게 한다(불변식 ④). 틱은 대기(직렬화)하고, 수동 검색은 잠겨 있으면 409 로 거절한다.
+# in-memory 로 충분(uvicorn --workers 1 전제, NFR-P1).
+_source_locks: dict[int, asyncio.Lock] = {}
 
 
 def _now() -> datetime:
@@ -52,11 +56,16 @@ def _is_due(source: Source, now: datetime) -> bool:
     return source.last_polled_at + timedelta(seconds=source.poll_interval_sec) <= now
 
 
+def source_lock(source_id: int) -> asyncio.Lock:
+    return _source_locks.setdefault(source_id, asyncio.Lock())
+
+
 def forget_source(source_id: int) -> None:
     """소스 삭제 시 실패 카운터/조정 실패 상태 정리(미세 누수 방지)."""
     _fail_counts.pop(source_id, None)
     _reconcile_fail_counts.pop(source_id, None)
     _reconcile_failing.discard(source_id)
+    _source_locks.pop(source_id, None)
 
 
 async def poll_tick() -> None:
@@ -76,21 +85,29 @@ async def poll_tick() -> None:
 @dataclass
 class PollResult:
     """수집 1회 결과 — `posts` 는 어댑터가 반환한 글 전량(매칭 여부 무관), `stored` 는
-    저장 시도한 매칭 글 수(dedup 무시분 포함), `error` 는 실패 시 안전 요약(불변식 ③)."""
+    검토 큐에 새로 저장된 매칭 글 수(dedup 무시분 제외), `error` 는 실패 시 안전 요약(불변식 ③)."""
 
     stored: int = 0
     posts: list = field(default_factory=list)
     error: str | None = None
+    # 이번 호출이 429/403 을 맞아 backoff 를 새로 걸었는지 — API 가 502 대신 429 로 매핑한다.
+    rate_limited: bool = False
 
 
 async def poll_source(source: Source) -> int:
-    """소스 1개 수집. 저장 시도한 매칭 글 수를 반환(dedup 무시분 포함)."""
+    """소스 1개 수집. 검토 큐에 새로 저장된 매칭 글 수를 반환(dedup 으로 무시된 기존 글 제외)."""
     return (await poll_source_detailed(source)).stored
 
 
 async def poll_source_detailed(source: Source) -> PollResult:
     """`poll_source` 와 회계가 동일하되 반환된 글·실패 요약까지 돌려준다 — 수동 검색
-    엔드포인트(`POST /api/sources/{id}/poll-now`)가 "검색 결과" 를 화면에 보여주는 용도."""
+    엔드포인트(`POST /api/sources/{id}/poll-now`)가 "검색 결과" 를 화면에 보여주는 용도.
+    소스 락으로 같은 소스의 동시 수집을 직렬화한다(불변식 ④)."""
+    async with source_lock(source.id):
+        return await _poll_source_locked(source)
+
+
+async def _poll_source_locked(source: Source) -> PollResult:
     adapter = get_adapter(source.type)
     # 폴링 시각을 먼저 커밋 — 이후 어떤 단계가 실패해도 poll_interval 은 지켜진다
     # (저장 실패가 매 tick 재요청 루프가 되던 경로 봉합 — 불변식 ④, 적대 리뷰 H4).
@@ -98,9 +115,12 @@ async def poll_source_detailed(source: Source) -> PollResult:
     await source.save(update_fields=["last_polled_at"])
     if adapter is None:
         # 어댑터 미구현 타입이 "정상(ok)"으로 보이며 영구 skip 되지 않게 명시 회계.
+        error = f"지원되지 않는 소스 타입: {source.type.value}"
         source.health_status = HealthStatus.down
-        await source.save(update_fields=["health_status"])
-        return PollResult(error=f"지원되지 않는 소스 타입: {source.type.value}")
+        source.last_error = error
+        source.last_error_at = _now()
+        await source.save(update_fields=["health_status", "last_error", "last_error_at"])
+        return PollResult(error=error)
 
     try:
         posts = await adapter.fetch(source, source.last_success_at)
@@ -110,7 +130,7 @@ async def poll_source_detailed(source: Source) -> PollResult:
         await _record_failure(
             source, retry_after_sec=exc.retry_after_sec, rate_limited=True, error=error,
         )
-        return PollResult(error=error)
+        return PollResult(error=error, rate_limited=True)
     except Exception as exc:
         # fetch 실패(FetchError)든 저장 실패든 동일하게 회계한다 — 커서 미전진 + health 반영.
         logger.exception("소스 수집/저장 실패 source=%s", source.id)
@@ -250,6 +270,14 @@ async def _store_matches(source: Source, posts: list) -> int:
         )
     if not rows:
         return 0
+    # 신규 건수 산정용 사전 조회 — bulk_create(ignore_conflicts) 는 삽입 행 수를 돌려주지
+    # 않는다. 조회↔삽입 사이에 다른 경로가 같은 글을 넣으면 표시 숫자만 1 크게 나올 수 있다
+    # (동시 수집은 소스 락으로 직렬화돼 실질적으로 없음). dedup 자체는 unique 제약이 보장한다.
+    existing = set(
+        await MatchedPost.filter(
+            source=source, external_post_id__in=[r.external_post_id for r in rows]
+        ).values_list("external_post_id", flat=True)
+    )
     # (source_id, external_post_id) unique + ignore_conflicts = upsert-ignore dedup (FR-2)
     await MatchedPost.bulk_create(rows, ignore_conflicts=True)
-    return len(rows)
+    return sum(1 for r in rows if r.external_post_id not in existing)
