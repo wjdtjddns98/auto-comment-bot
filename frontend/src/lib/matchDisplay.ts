@@ -60,6 +60,48 @@ export function getSourceDisplayName(source: Source): string {
   return `#${source.id}`;
 }
 
+/**
+ * 수동 검색(`POST /api/sources/{id}/poll-now`)이 무엇을 대상으로 했는지 한 줄로.
+ *
+ * 결과 패널 머리에 놓아 "이 검색어로 검색했다"를 화면에 남기기 위한 값이다 — 앱 검수(Threads
+ * `threads_keyword_search`)가 요구하는 "keyword search within your app" 장면이 소스 설정
+ * 화면과 결과 목록으로 흩어지지 않게 한다(이슈 #118).
+ */
+export function describeSourceTarget(source: Source): string {
+  if (source.type === "threads") {
+    const query = getThreadsQuery(source.config);
+    return query ? `검색어 "${query}"` : "검색어 미설정";
+  }
+  if (source.type === "community") {
+    const url = getRssUrl(source.config);
+    return url ? `피드 ${url}` : "피드 URL 미설정";
+  }
+  return `소스 #${source.id}`;
+}
+
+/**
+ * 수동 검색 결과 요약 문구.
+ *
+ * 반환 수는 `posts.length` 가 아니라 `fetched` 로 센다 — `posts` 에는 표시용 상한(최대 50건)이
+ * 걸려 있어서 목록 길이로는 실제로 몇 건이 왔는지 말할 수 없다. `stored` 는 검토 큐에 **새로**
+ * 저장된 건수라 재검색하면 0 이 온다(docs/API-SPEC.md §소스, 백엔드 PR #117 두 번째 커밋).
+ */
+export function describePollSummary(fetched: number, stored: number): string {
+  if (fetched === 0) return "반환된 글 없음";
+  return `${fetched}건 반환 · 검토 큐에 ${stored}건 추가`;
+}
+
+/**
+ * 표시용 상한에 걸려 잘린 경우에만 알려주는 보조 문구.
+ *
+ * 목록에 50건만 보이는데 요약은 "120건 반환"이라고 하면 화면이 스스로 모순돼 보인다.
+ * 잘리지 않았으면 null — 굳이 말할 것이 없다.
+ */
+export function describePollTruncation(fetched: number, shown: number): string | null {
+  if (shown >= fetched) return null;
+  return `반환된 ${fetched}건 중 상위 ${shown}건만 표시합니다(본문은 1,000자까지).`;
+}
+
 // Threads 플랫폼 실 상한(API 의 final_body 상한은 2000자지만 전송 시 500자 초과는 502 확정 실패) — 이슈 #30.
 export const THREADS_BODY_LIMIT = 500;
 

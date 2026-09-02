@@ -16,6 +16,7 @@ import type {
   PatchSourceRequest,
   PatchTemplateRequest,
   PatchUserRequest,
+  PollNowResponse,
   RenderTemplateRequest,
   RenderTemplateResponse,
   ReplyAction,
@@ -37,14 +38,25 @@ export class ApiError extends Error {
   detail: string;
   // 502 응답의 action("failed"|"unknown") — 재시도 가능 여부 구분에 필요(docs/API-SPEC.md §매칭).
   action?: string;
+  // 429 의 `Retry-After`(초). 수동 검색(poll-now)이 backoff·쿨다운·업스트림 429 를 이 헤더로
+  // 알려준다 — 호출부가 그 시간만큼 버튼을 잠근다(docs/API-SPEC.md §소스).
+  retryAfterSec?: number;
 
-  constructor(status: number, detail: string, action?: string) {
+  constructor(status: number, detail: string, action?: string, retryAfterSec?: number) {
     super(detail);
     this.name = "ApiError";
     this.status = status;
     this.detail = detail;
     this.action = action;
+    this.retryAfterSec = retryAfterSec;
   }
+}
+
+/** `Retry-After`(초 단위 정수)만 해석한다. HTTP-date 형식은 이 API 가 쓰지 않는다. */
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const secs = Number(value.trim());
+  return Number.isFinite(secs) && secs > 0 ? Math.ceil(secs) : undefined;
 }
 
 const MUTATING_METHODS = new Set(["POST", "PATCH", "DELETE", "PUT"]);
@@ -123,7 +135,9 @@ async function request<T>(
     try {
       return await mockRequest<T>(path, options);
     } catch (err) {
-      if (err instanceof MockApiError) throw new ApiError(err.status, err.detail, err.action);
+      if (err instanceof MockApiError) {
+        throw new ApiError(err.status, err.detail, err.action, err.retryAfterSec);
+      }
       throw err;
     }
   }
@@ -176,7 +190,7 @@ async function request<T>(
     } catch {
       // 응답 본문이 JSON이 아니면 statusText 유지
     }
-    throw new ApiError(res.status, detail, action);
+    throw new ApiError(res.status, detail, action, parseRetryAfter(res.headers?.get("Retry-After")));
   }
 
   if (res.status === 204) return undefined as T;
@@ -221,6 +235,11 @@ export const patchSource = (id: number, body: PatchSourceRequest) =>
   request<Source>(`/api/sources/${id}`, { method: "PATCH", body });
 export const deleteSource = (id: number) =>
   request<void>(`/api/sources/${id}`, { method: "DELETE" });
+// 수동 검색 — 스케줄 주기와 무관하게 이 소스를 지금 1회 수집하고 반환된 글을 돌려준다.
+// `enabled=false` 소스도 호출 가능하다(주기 수집 on/off 와 별개). 오류는 detail 을 그대로
+// 보여준다: 429(활성 backoff 중) · 409(같은 소스 검색이 이미 진행 중) · 502(수집 실패).
+export const pollSourceNow = (id: number) =>
+  request<PollNowResponse>(`/api/sources/${id}/poll-now`, { method: "POST" });
 
 export const getKeywords = () => request<Keyword[]>("/api/keywords");
 export const createKeyword = (body: CreateKeywordRequest) =>

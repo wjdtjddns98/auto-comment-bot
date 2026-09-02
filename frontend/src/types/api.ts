@@ -54,6 +54,29 @@ export interface PatchSourceRequest {
   config?: Record<string, unknown>;
 }
 
+// --- 수동 검색 (POST /api/sources/{id}/poll-now, admin) ---
+// 어댑터가 이번 호출에 반환한 글 1건. 키워드 매칭 여부와 무관한 **원본 반환값**이라
+// MatchedPost 와 달리 id·status·matched_keyword_id 가 없다 — 검토 큐 항목이 아니다.
+export interface PolledPost {
+  external_post_id: string;
+  author: string | null;
+  url: string | null;
+  content: string;
+  published_at: string | null;
+}
+
+export interface PollNowResponse {
+  // 이번 수집으로 갱신된 소스(last_success_at·health_status·last_error).
+  source: Source;
+  // ⚠️ **표시용 상한이 걸린 목록**이다 — 최대 50건, `content` 는 1,000자로 절단된다.
+  // 전량 개수는 `fetched` 이므로 "N건 반환"은 posts.length 가 아니라 fetched 로 적는다.
+  posts: PolledPost[];
+  // 어댑터가 이번 호출에 반환한 글 전체 수(상한 적용 전).
+  fetched: number;
+  // 키워드 매칭·dedup 을 거쳐 검토 큐에 **새로** 저장된 건수 — 같은 글을 재검색하면 0 이다.
+  stored: number;
+}
+
 export type MatchType = "substring" | "regex";
 
 export interface Keyword {
