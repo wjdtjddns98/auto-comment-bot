@@ -80,6 +80,13 @@ class SourceAdapter(Protocol):
     can_write: bool
     # 타입별 config 스키마 — API 계층이 등록/수정 시점에 검증한다(extra="forbid" 권장).
     config_model: type[BaseModel]
+    # `FetchedPost.author` 가 **사람(글쓴이)** 인가. 소스가 글쓴이를 노출하지 않아
+    # 다른 값(예: 카페 이름)을 출처 표시용으로 넣는 어댑터는 False 로 둔다.
+    # False 면 답변 템플릿의 `{{author}}` 치환에 쓰지 않는다 — 치환에 썼다면
+    # "전국 점포 직거래님, 안녕하세요" 처럼 카페를 사람으로 부르는 문구가 만들어지고,
+    # 그 문구는 클립보드로 복사돼 사람이 실제 게시글에 붙여넣는다. templating 의
+    # 원칙("값을 얻을 수 없는 변수는 조용히 비우지 않고 에러")을 그대로 따른다.
+    author_is_person: bool
 
     async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:
         """since(=last_success_at 커서) 이후 글 목록. 활용 여부는 어댑터 재량 —

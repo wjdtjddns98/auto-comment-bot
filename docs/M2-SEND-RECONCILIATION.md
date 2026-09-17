@@ -362,8 +362,30 @@ live 는 핸들 변경(rename) 후 `/replies` 가 현재 핸들을 반환하는 
       (요약 문자열, 자격증명 echo 금지 — 불변식 ③) + `last_error_at` 추가, FE 배지
       hover 로 노출([FE 공유] 필요).
 
+- [ ] R18. **R16 형제 가드가 클립보드 경로에는 안 걸린다**(naver_cafe 어댑터 적대 리뷰에서
+      발견, 2026-09-17): `matches.py` 의 중복 발송 경고는 `will_send` 일 때만 돈다. dedup 키가
+      `(source_id, external_post_id)` 라, 검색어가 겹치는 `naver_cafe` 소스 둘이 같은 카페
+      글을 각각 저장하면 **승인 가능한 행이 2개** 생기고 리뷰어가 같은 글에 댓글을 두 번
+      붙여넣는다 — R16 이 막으려던 상황을 사람이 대신 수행하는 꼴이다. RSS 에도 있던
+      구조지만, 하나의 카페 말뭉치를 검색어로 겹쳐 훑는 naver_cafe 에서 발생 확률이 훨씬
+      높다. 수정안: 형제 검사를 `can_write=False` 승인 경로까지 확장(차단이 아니라 경고 표시).
+
+- [ ] R19. **네이버 검색 API 한도에 소스 간 회계가 없다**(2026-09-17): 한도 25,000회/일은
+      **클라이언트 ID 합산**인데 `poll_interval_sec` 하한이 60초(`sources.py`)라 소스 1개가
+      최대 1,440회/일을 쓴다 — **naver_cafe 소스 17개면 한도 소진**. 기본 300초면 288회/일로
+      약 86개. `poll-now` 수동 호출과 같은 키를 쓰는 다른 네이버 검색 API 사용분은 추가다.
+      현재 방어는 어댑터의 프로세스 전역 쿨다운(429/403 수신 후 전 소스 정지)뿐이고, **소진
+      이전을 막는 회계는 없다**. `create_source` 도 기존 naver_cafe 소스 수를 세지 않는다.
+      수정안: 일일 카운터 또는 naver_cafe 타입의 `poll_interval_sec` 하한 상향.
+
+- [ ] R20. **`Platform` enum 에 `naver_cafe` 가 없다**(2026-09-17): 모델은 `Platform.naver`
+      인데 FE `SnsPlatform` 은 `naver_cafe` 를 포함해 계정 생성 시 422 가 난다. 기존 결함이나
+      naver_cafe 소스가 생긴 지금에야 실제로 계정을 만들 이유가 생겼다. 수집 자체는 계정이
+      필요 없어(검색 API 는 앱 자격증명) 당장 막히진 않는다.
+
 ## 참고 문서
 
+- 네이버 카페글 검색(파라미터·응답 필드·한도 25,000/일): developers.naver.com/docs/serviceapi/search/cafearticle/cafearticle.md
 - Threads Posts(게시 2단계·250/24h·30초 대기): developers.facebook.com/docs/threads/posts
 - Create Replies(`reply_to_id`): developers.facebook.com/docs/threads/retrieve-and-manage-replies/create-replies
 - Reply Management 레퍼런스(`/replies`·`/conversation` 필드): developers.facebook.com/docs/threads/reference/reply-management

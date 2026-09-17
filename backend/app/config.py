@@ -18,6 +18,13 @@ class Settings(BaseSettings):
     threads_app_secret: str = Field(default="", repr=False)  # repr/디버그 출력에서도 제외
     threads_redirect_uri: str = ""  # 콘솔에 등록된 redirect URI 와 정확히 일치해야 함
 
+    # 네이버 검색 OpenAPI (naver_cafe 소스). 비로그인 방식 — 헤더 2개로만 인증한다.
+    # 앱 단위 자격증명이라 소스 config 가 아니라 .env 로만 주입한다(config 는 GET
+    # /api/sources 응답에 그대로 실린다 — 불변식 ③). 비면 수집이 FetchError 로 실패.
+    # 한도는 클라이언트 ID 별 합산 25,000회/일이며 검색 API 전체가 나눠 쓴다.
+    naver_client_id: str = ""
+    naver_client_secret: str = Field(default="", repr=False)  # repr/디버그 출력에서 제외
+
     # 인증/암호화 (M1)
     # 세션 쿠키 서명·암호화 키(Fernet). dev 에서 비면 임시 키 자동 생성(app/auth.py).
     session_fernet_key: str = ""

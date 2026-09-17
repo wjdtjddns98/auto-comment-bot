@@ -9,13 +9,14 @@ from app.sources.base import (  # noqa: F401 - 편의 re-export
     SendOutcomeUnknown,
     SourceAdapter,
 )
+from app.sources.naver_cafe import NaverCafeAdapter
 from app.sources.rss import RssAdapter
 from app.sources.threads import ThreadsAdapter
 
-# naver_cafe 어댑터는 후속 PR (네이버 검색 OpenAPI)
 _ADAPTERS: dict[SourceType, SourceAdapter] = {
     SourceType.community: RssAdapter(),
     SourceType.threads: ThreadsAdapter(),
+    SourceType.naver_cafe: NaverCafeAdapter(),
 }
 
 

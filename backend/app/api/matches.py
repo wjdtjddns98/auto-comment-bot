@@ -393,9 +393,19 @@ async def render_template(
     if template is None:
         raise HTTPException(status_code=422, detail="template_id: 템플릿이 없거나 비활성입니다")
     posts = await MatchedPost.filter(id__in=body.match_ids).only(
-        "id", "author", "url", "matched_keyword_id"
+        "id", "author", "url", "matched_keyword_id", "source_id"
     )
     found = {p.id: p for p in posts}
+    # 소스별 author 의미 판정 — 글쓴이를 노출하지 않는 소스(naver_cafe)는 author 자리에
+    # 카페 이름이 들어 있다. 그대로 {{author}} 에 치환하면 "○○카페님, 안녕하세요" 가
+    # 만들어지고, can_write=False 소스라 그 문구는 클립보드로 복사돼 사람이 실제
+    # 게시글에 붙여넣는다. 값이 없는 것으로 보고 렌더 에러를 내는 편이 맞다
+    # (templating 모듈의 "조용히 비우지 않는다" 원칙).
+    src_ids = {p.source_id for p in posts}
+    person_author = {
+        s.id: getattr(get_adapter(s.type), "author_is_person", True)
+        for s in await Source.filter(id__in=list(src_ids)).only("id", "type")
+    }
     # 키워드는 한 번에 조회한다(N+1 방지). matched_keyword 는 nullable FK 라
     # `await post.matched_keyword` 는 값이 없을 때 None 을 await 해 TypeError 가 된다.
     kw_ids = {p.matched_keyword_id for p in posts if p.matched_keyword_id}
@@ -411,7 +421,7 @@ async def render_template(
             items.append(RenderItem(match_id=match_id, body=None, error="매칭이 없습니다"))
             continue
         context = {
-            "author": post.author,
+            "author": post.author if person_author.get(post.source_id, True) else None,
             "keyword": kw_patterns.get(post.matched_keyword_id),
             "url": post.url,
         }
