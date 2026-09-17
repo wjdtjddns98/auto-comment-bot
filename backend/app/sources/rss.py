@@ -146,6 +146,7 @@ class RssConfig(BaseModel):
 
 class RssAdapter:
     can_write = False
+    author_is_person = True  # 피드 entry.author = 글쓴이
     config_model = RssConfig
 
     async def fetch(self, source: Source, since: datetime | None) -> list[FetchedPost]:

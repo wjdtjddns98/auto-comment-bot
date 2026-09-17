@@ -104,11 +104,25 @@ async def test_source_name_lifecycle(admin_session):
         await client.delete(f"/api/sources/{src['id']}", headers=csrf)
 
 
-async def test_source_unsupported_type_422(admin_session):
-    # 어댑터 미구현 타입(naver_cafe)은 등록 자체를 거부 — "정상처럼 보이는데 수집 안 됨" 방지
+async def test_source_naver_cafe_config_schema(admin_session):
+    """naver_cafe 소스: config 는 query 필수 — 등록 시점 422.
+
+    어댑터가 붙기 전에는 이 요청이 "미구현 타입" 으로 422 였다. 지금은 어댑터가 있어
+    **config 검증**으로 422 가 나므로, 거부 사유까지 확인해야 테스트가 의미를 갖는다.
+    """
     client, csrf = admin_session
     r = await client.post("/api/sources", json={"type": "naver_cafe"}, headers=csrf)
     assert r.status_code == 422
+    assert "config.query" in r.json()["detail"]
+    # 스키마를 만족하면 등록된다(어댑터 등록 여부의 실질 확인)
+    r = await client.post(
+        "/api/sources", json={"type": "naver_cafe", "config": {"query": "창업"}}, headers=csrf
+    )
+    assert r.status_code == 201, r.text
+    try:
+        assert r.json()["config"] == {"query": "창업"}
+    finally:
+        await client.delete(f"/api/sources/{r.json()['id']}", headers=csrf)
 
 
 async def test_source_threads_config_schema(admin_session):

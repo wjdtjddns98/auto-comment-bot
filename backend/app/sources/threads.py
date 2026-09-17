@@ -141,6 +141,7 @@ class ThreadsConfig(BaseModel):
 
 class ThreadsAdapter:
     can_write = True
+    author_is_person = True  # username = 글쓴이 핸들
     config_model = ThreadsConfig
 
     # ── read: 키워드 수집 ─────────────────────────────────────────────────
