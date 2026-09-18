@@ -77,8 +77,16 @@ describe("describeSourceTarget", () => {
     );
   });
 
-  it("어댑터가 없는 타입은 소스 번호로 떨어진다", () => {
-    const source = makeSource({ id: 7, type: "naver_cafe", config: { cafe_id: "x" } });
-    expect(describeSourceTarget(source)).toBe("소스 #7");
+  // 네이버 카페도 검색어 소스다 — 설정 키가 `query` 이고(`cafe_id` 는 존재하지 않는 키),
+  // threads 와 같은 머리말을 써야 검색 결과 패널이 "소스 #7" 로 떨어지지 않는다(이슈 #121).
+  it("naver_cafe 는 검색어를 보여준다 — 설정 키는 query 다", () => {
+    const source = makeSource({ id: 7, type: "naver_cafe", config: { query: "강아지 간식" } });
+    expect(describeSourceTarget(source)).toBe('검색어 "강아지 간식"');
+  });
+
+  it("naver_cafe 도 검색어가 비면 미설정 문구로 떨어진다", () => {
+    expect(describeSourceTarget(makeSource({ type: "naver_cafe", config: {} }))).toBe(
+      "검색어 미설정"
+    );
   });
 });

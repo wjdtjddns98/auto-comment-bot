@@ -16,13 +16,15 @@ import {
   SOURCE_TYPE_LABEL,
   describePollSummary,
   describePollTruncation,
+  describeAuthor,
   describeSourceTarget,
   formatDateTime,
   getRssUrl,
+  getSearchQuery,
   getSourceDisplayName,
   getThreadsAccountId,
-  getThreadsQuery,
   HEALTH_TONE,
+  isSearchQuerySource,
   sourceErrorTitle,
   toPlainText,
 } from "../lib/matchDisplay";
@@ -42,11 +44,12 @@ function CreateSourceForm() {
   const [type, setType] = useState<SourceType>("community");
   const [name, setName] = useState("");
   const [rssUrl, setRssUrl] = useState("");
-  const [threadsQuery, setThreadsQuery] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
   const [threadsAccountId, setThreadsAccountId] = useState<number | "">("");
   const [pollIntervalSec, setPollIntervalSec] = useState(300);
   const [error, setError] = useState<string | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[type];
+  const isQuerySource = isSearchQuerySource(type);
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
 
   const mutation = useMutation({
@@ -54,7 +57,7 @@ function CreateSourceForm() {
     onSuccess: () => {
       setName("");
       setRssUrl("");
-      setThreadsQuery("");
+      setSearchQuery("");
       setThreadsAccountId("");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["sources"] });
@@ -65,19 +68,23 @@ function CreateSourceForm() {
   function handleSubmit() {
     if (!implemented) return;
     const trimmedName = name.trim();
-    if (type === "threads") {
-      if (!threadsQuery.trim()) {
+    if (isQuerySource) {
+      if (!searchQuery.trim()) {
         setError("검색어를 입력하세요.");
         return;
       }
-      if (threadsAccountId === "") {
+      if (type === "threads" && threadsAccountId === "") {
         setError("수집에 사용할 threads 계정을 선택하세요.");
         return;
       }
       mutation.mutate({
         name: trimmedName || undefined,
         type,
-        config: { query: threadsQuery.trim(), sns_account_id: threadsAccountId },
+        // 네이버 카페는 검색어가 유일한 설정 키다 — 계정 등 다른 키를 얹으면 서버가 422 로 거른다.
+        config:
+          type === "threads"
+            ? { query: searchQuery.trim(), sns_account_id: threadsAccountId }
+            : { query: searchQuery.trim() },
         poll_interval_sec: pollIntervalSec,
       });
       return;
@@ -126,30 +133,41 @@ function CreateSourceForm() {
           />
         </Field>
       </div>
-      {type === "threads" ? (
-        <div className="flex flex-wrap gap-4">
-          <Field label="검색어(1~100자)">
-            <Input
-              type="text"
-              maxLength={100}
-              placeholder="예: 강아지 간식"
-              value={threadsQuery}
-              onChange={(e) => setThreadsQuery(e.target.value)}
-            />
-          </Field>
-          <Field label="수집 계정(본인 threads 계정)">
-            <Select
-              value={threadsAccountId}
-              onChange={(e) => setThreadsAccountId(e.target.value === "" ? "" : Number(e.target.value))}
-            >
-              <option value="">계정 선택</option>
-              {threadsAccounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.display_name}
-                </option>
-              ))}
-            </Select>
-          </Field>
+      {isQuerySource ? (
+        <div className="flex flex-col gap-1">
+          <div className="flex flex-wrap gap-4">
+            <Field label="검색어(1~100자)">
+              <Input
+                type="text"
+                maxLength={100}
+                placeholder="예: 강아지 간식"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </Field>
+            {/* 네이버 카페는 검색 API 가 카페를 지정할 수 없어 검색어 외에 설정할 것이 없다. */}
+            {type === "threads" && (
+              <Field label="수집 계정(본인 threads 계정)">
+                <Select
+                  value={threadsAccountId}
+                  onChange={(e) => setThreadsAccountId(e.target.value === "" ? "" : Number(e.target.value))}
+                >
+                  <option value="">계정 선택</option>
+                  {threadsAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.display_name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
+          </div>
+          {type === "naver_cafe" && (
+            <p className="text-xs text-gray-500">
+              검색어로 카페글 전체를 검색합니다(특정 카페 지정 불가). 수집 자격증명은 서버 설정을
+              쓰므로 여기서 계정을 고르지 않습니다 — 답변은 전송 대신 클립보드 복사로 처리됩니다.
+            </p>
+          )}
         </div>
       ) : implemented ? (
         <Field label="RSS URL">
@@ -229,7 +247,10 @@ function PollResultModal({ result, onClose }: { result: PollNowResponse; onClose
                 className="flex flex-col gap-1 rounded-md border border-gray-200 p-3"
               >
                 <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                  <span className="font-medium text-gray-700">{post.author || "작성자 미상"}</span>
+                  {/* 네이버 카페는 이 자리에 카페 이름이 온다 — 사람 이름처럼 보이지 않게 갈라 준다. */}
+                  <span className="font-medium text-gray-700">
+                    {describeAuthor(source.type, post.author, "작성자 미상")}
+                  </span>
                   <span>{formatDateTime(post.published_at)}</span>
                   {post.url && (
                     <a
@@ -271,7 +292,7 @@ function SourceRow({ source }: { source: Source }) {
   const [name, setName] = useState(source.name ?? "");
   const [pollIntervalSec, setPollIntervalSec] = useState(source.poll_interval_sec);
   const [rssUrl, setRssUrl] = useState(() => getRssUrl(source.config));
-  const [threadsQuery, setThreadsQuery] = useState(() => getThreadsQuery(source.config));
+  const [searchQuery, setSearchQuery] = useState(() => getSearchQuery(source.config));
   const [threadsAccountId, setThreadsAccountId] = useState<number | "">(() =>
     getThreadsAccountId(source.config)
   );
@@ -284,6 +305,7 @@ function SourceRow({ source }: { source: Source }) {
   const pollErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
   const isThreads = source.type === "threads";
+  const isQuerySource = isSearchQuerySource(source.type);
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
 
   function invalidate() {
@@ -361,16 +383,19 @@ function SourceRow({ source }: { source: Source }) {
       name: name.trim() || null,
     };
     if (implemented) {
-      if (isThreads) {
-        if (!threadsQuery.trim()) {
+      if (isQuerySource) {
+        if (!searchQuery.trim()) {
           setError("검색어를 입력하세요.");
           return;
         }
-        if (threadsAccountId === "") {
+        if (isThreads && threadsAccountId === "") {
           setError("수집에 사용할 threads 계정을 선택하세요.");
           return;
         }
-        body.config = { query: threadsQuery.trim(), sns_account_id: threadsAccountId };
+        // 네이버 카페는 검색어만 — 다른 키를 함께 보내면 422 다(서버 스키마 extra=forbid).
+        body.config = isThreads
+          ? { query: searchQuery.trim(), sns_account_id: threadsAccountId }
+          : { query: searchQuery.trim() };
       } else {
         if (!rssUrl.trim()) {
           setError("RSS URL을 입력하세요.");
@@ -405,26 +430,29 @@ function SourceRow({ source }: { source: Source }) {
           )}
         </Td>
         <Td className="max-w-xs">
-          {editing && implemented && isThreads ? (
+          {editing && implemented && isQuerySource ? (
             <div className="flex flex-col gap-1">
               <Input
                 type="text"
                 maxLength={100}
                 placeholder="검색어"
-                value={threadsQuery}
-                onChange={(e) => setThreadsQuery(e.target.value)}
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
               />
-              <Select
-                value={threadsAccountId}
-                onChange={(e) => setThreadsAccountId(e.target.value === "" ? "" : Number(e.target.value))}
-              >
-                <option value="">계정 선택</option>
-                {threadsAccounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.display_name}
-                  </option>
-                ))}
-              </Select>
+              {/* 네이버 카페는 계정 설정이 없다 — 수집은 서버 자격증명으로 돈다. */}
+              {isThreads && (
+                <Select
+                  value={threadsAccountId}
+                  onChange={(e) => setThreadsAccountId(e.target.value === "" ? "" : Number(e.target.value))}
+                >
+                  <option value="">계정 선택</option>
+                  {threadsAccounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.display_name}
+                    </option>
+                  ))}
+                </Select>
+              )}
             </div>
           ) : editing && implemented ? (
             <Input
@@ -435,8 +463,10 @@ function SourceRow({ source }: { source: Source }) {
             />
           ) : isThreads ? (
             <span className="break-all text-xs text-gray-500">
-              "{getThreadsQuery(source.config)}" · 계정 #{getThreadsAccountId(source.config) || "-"}
+              "{getSearchQuery(source.config)}" · 계정 #{getThreadsAccountId(source.config) || "-"}
             </span>
+          ) : isQuerySource ? (
+            <span className="break-all text-xs text-gray-500">"{getSearchQuery(source.config)}"</span>
           ) : implemented ? (
             <span className="break-all text-xs text-gray-500">{getRssUrl(source.config)}</span>
           ) : (
@@ -498,7 +528,8 @@ function SourceRow({ source }: { source: Source }) {
             ) : (
               <>
                 {/* 앱 검수용 수동 검색(이슈 #118) — 주기 수집과 무관하게 지금 1회 검색한다.
-                    어댑터가 없는 타입(naver_cafe)은 서버가 502 를 내므로 아예 막는다. */}
+                    어댑터가 없는 타입은 서버가 502 를 내므로 아예 막는다(현재는 세 타입 모두
+                    어댑터가 있어 열려 있다 — naver_cafe 는 백엔드 PR #120 에서 붙었다). */}
                 <Button
                   size="sm"
                   disabled={!implemented || pollMutation.isPending || retryAfterSec > 0}

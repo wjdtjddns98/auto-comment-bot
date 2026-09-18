@@ -19,6 +19,7 @@ import type {
   RenderTemplateResponse,
   ReplyAction,
   Source,
+  SourceType,
   SnsAccount,
   Template,
   ThreadsOAuthAuthorizeUrlResponse,
@@ -348,7 +349,12 @@ function handleRenderTemplate(body: unknown): RenderTemplateResponse {
         ? keywords.find((k) => k.id === post.matched_keyword_id)?.pattern ?? null
         : null;
     try {
-      const context = { author: post.author, keyword, url: post.url };
+      // 네이버 카페는 `author` 자리에 카페 이름이 와서 사람 이름이 아니다 — 백엔드는 어댑터의
+      // "작성자가 사람인가" 플래그로 이 변수를 무효화한다(backend/app/sources/base.py,
+      // app/api/matches.py). mock 도 null 로 둬야 "{{author}} 를 쓰면 그 건만 에러" 가 재현된다.
+      const source = sources.find((s) => s.id === post.source_id);
+      const author = source?.type === "naver_cafe" ? null : post.author;
+      const context = { author, keyword, url: post.url };
       return { match_id: matchId, body: renderTemplateBody(template.body, context), error: null };
     } catch (err) {
       if (err instanceof TemplateRenderError) {
@@ -369,6 +375,33 @@ function handleGetSources(): Source[] {
   return [...sources];
 }
 
+// 타입별 config 허용 키 — 서버 스키마가 `extra=forbid` 라 목록 밖의 키는 실서버에서 422 다
+// (docs/API-SPEC.md §소스). 검증을 목에서 생략하면 `cafe_id` 처럼 없는 키를 보내는 버그가
+// mock QA 를 통과해버린다(이슈 #121 에서 실제로 그랬다).
+const SOURCE_CONFIG_KEYS: Record<SourceType, { required: string[]; optional: string[] }> = {
+  threads: { required: ["query", "sns_account_id"], optional: [] },
+  naver_cafe: { required: ["query"], optional: [] },
+  community: { required: ["rss_url"], optional: [] },
+};
+
+function validateSourceConfig(type: SourceType, config: Record<string, unknown>): void {
+  const spec = SOURCE_CONFIG_KEYS[type];
+  if (!spec) throw new MockApiError(422, `type: 지원되지 않는 소스 타입: ${type}`);
+  for (const key of spec.required) {
+    if (config[key] === undefined || config[key] === null || config[key] === "") {
+      throw new MockApiError(422, `소스 설정이 올바르지 않습니다 — config.${key}: 필수 항목입니다`);
+    }
+  }
+  const allowed = new Set([...spec.required, ...spec.optional]);
+  const extra = Object.keys(config).find((key) => !allowed.has(key));
+  if (extra) {
+    throw new MockApiError(
+      422,
+      `소스 설정이 올바르지 않습니다 — config.${extra}: 허용되지 않는 항목입니다`
+    );
+  }
+}
+
 // 공백뿐인 값은 null 로 정규화(API-SPEC.md §소스).
 function normalizeSourceName(name: unknown): string | null {
   if (typeof name !== "string") return null;
@@ -381,6 +414,7 @@ function handleCreateSource(body: unknown): Source {
   const req = (body ?? {}) as Pick<Source, "type" | "config" | "poll_interval_sec"> & {
     name?: string | null;
   };
+  validateSourceConfig(req.type, req.config ?? {});
   const record: Source = {
     id: nextId(sources),
     name: normalizeSourceName(req.name),
@@ -402,7 +436,8 @@ function handlePatchSource(id: number, body: unknown): Source {
   requireUser();
   const record = sources.find((s) => s.id === id);
   if (!record) throw new MockApiError(404, "소스를 찾을 수 없습니다.");
-  const req = (body ?? {}) as { name?: string | null };
+  const req = (body ?? {}) as { name?: string | null; config?: Record<string, unknown> };
+  if (req.config !== undefined) validateSourceConfig(record.type, req.config);
   const patch = { ...(body as object) };
   if ("name" in req) {
     Object.assign(patch, { name: normalizeSourceName(req.name) });

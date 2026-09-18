@@ -30,6 +30,11 @@ function TemplateSyntaxHelp() {
           값이 없는 변수(작성자 미확보)나 오타 변수는 <strong>그 건만 미리보기에서 제외</strong>
           됩니다 — 빈 문구로 나가지 않습니다.
         </li>
+        <li>
+          네이버 카페 글은 검색 API 가 글쓴이를 주지 않아 <code>{"{{author}}"}</code> 가{" "}
+          <strong>항상 값 없음</strong>입니다 — 그 소스까지 함께 보낼 템플릿이라면 작성자 변수를
+          쓰지 마세요.
+        </li>
       </ul>
     </div>
   );
