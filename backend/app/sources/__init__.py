@@ -9,6 +9,7 @@ from app.sources.base import (  # noqa: F401 - 편의 re-export
     SendOutcomeUnknown,
     SourceAdapter,
 )
+from app.sources.dcinside import DcinsideAdapter
 from app.sources.naver_cafe import NaverCafeAdapter
 from app.sources.rss import RssAdapter
 from app.sources.threads import ThreadsAdapter
@@ -17,6 +18,7 @@ _ADAPTERS: dict[SourceType, SourceAdapter] = {
     SourceType.community: RssAdapter(),
     SourceType.threads: ThreadsAdapter(),
     SourceType.naver_cafe: NaverCafeAdapter(),
+    SourceType.dcinside: DcinsideAdapter(),
 }
 
 

@@ -30,6 +30,7 @@ class SourceType(str, Enum):
     threads = "threads"
     naver_cafe = "naver_cafe"
     community = "community"
+    dcinside = "dcinside"
 
 
 class HealthStatus(str, Enum):

@@ -93,7 +93,7 @@ Req `{ role }` → 200 `{ id, email, role, created_at }`.
 > `degraded` 로 보일 수 있다). 빈 결과 수집은 실패가 아니라 정상 성공(`ok`)이다.
 
 ### `POST /api/sources`
-Req `{ name?: string(≤100), type: "threads|naver_cafe|community", config: {...}, poll_interval_sec }` → 201 source.
+Req `{ name?: string(≤100), type: "threads|naver_cafe|community|dcinside", config: {...}, poll_interval_sec }` → 201 source.
 
 > `name`(선택): 표시용 이름(예: 커뮤니티/카페 이름). 미설정(null)이면 FE 는 config 값(URL·검색어)으로
 > 폴백 표시. 공백뿐인 값은 null 로 정규화. PATCH 에서 명시적 `name: null` = 이름 제거.
@@ -115,6 +115,15 @@ Req `{ name?: string(≤100), type: "threads|naver_cafe|community", config: {...
 > 같은 이유로 `POST /api/matches/render-template` 에서 이 소스의 매칭에 `{{author}}` 를
 > 쓰면 **그 건만 에러**가 된다(`"이 매칭에서 값을 얻을 수 없는 변수: author"`) — 카페
 > 이름을 사람 이름처럼 치환해 "○○카페님, 안녕하세요" 가 복사되는 것을 막기 위함이다.
+>
+> - `dcinside`: `{ "gallery_id": "dog" }` — 디시인사이드 갤러리 **공개 목록 페이지** 수집
+>   (읽기 전용, `can_write=false`). RSS 가 폐지돼 목록 HTML 을 읽는다. `gallery_id` 는
+>   영숫자·`_` 만(URL 주입 차단). FE 소스 폼에 dcinside 타입 추가 필요([FE 공유]).
+>
+> **dcinside 소스의 표시상 주의(FE 계약)**: 목록만 읽고 **본문은 요청하지 않는다**(글당
+> 1요청이면 주기마다 50배 — 예의 있는 수집에 어긋난다). 따라서 `content` 는 **제목뿐**이고
+> 키워드 매칭도 제목 기준이다. `published_at` 은 당일 글만 값이 있고 그 외는 `null`
+> (목록의 `26/09/17` 축약 표기는 연도·타임존이 모호해 쓰지 않는다). `author` 는 갤 닉네임.
 >
 > **수집 상한**: 한 주기에 **최대 100건(첫 페이지)**. 검색어가 넓어 결과가 그보다 많으면
 > 초과분은 그 주기에 누락된다(서버 경고 로그). 검색어를 좁히거나 주기를 줄여 대응한다.
