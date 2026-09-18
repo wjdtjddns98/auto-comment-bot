@@ -11,7 +11,7 @@ import {
   updateSnsAccountCredentials,
 } from "../lib/apiClient";
 import { describeApiError } from "../lib/errorMessage";
-import { formatDateTime, SOURCE_TYPE_LABEL } from "../lib/matchDisplay";
+import { formatDateTime } from "../lib/matchDisplay";
 import { useAuth } from "../hooks/useAuth";
 import type { SnsAccount, SnsPlatform } from "../types/api";
 import { Badge } from "../components/ui/Badge";
@@ -20,7 +20,15 @@ import { Card } from "../components/ui/Card";
 import { Field, Input, Select, Textarea } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 
-const PLATFORMS: SnsPlatform[] = ["threads", "naver_cafe", "community"];
+const PLATFORMS: SnsPlatform[] = ["threads", "naver", "community"];
+
+// 계정 플랫폼 라벨 — 소스 종류 라벨(SOURCE_TYPE_LABEL)과 키가 다르므로 재사용할 수 없다.
+// 네이버는 계정에서 `naver`, 소스에서 `naver_cafe` 다(types/api.ts SnsPlatform 주석 참조).
+const PLATFORM_LABEL: Record<SnsPlatform, string> = {
+  threads: "Threads",
+  naver: "네이버",
+  community: "커뮤니티",
+};
 
 // 콜백 페이지가 표시하는 연동 값(`code=...&state=...`) 또는 전체 콜백 URL 붙여넣기를
 // code/state 로 분리한다(docs/API-SPEC.md §threads-oauth — state 는 서버 검증 필수).
@@ -188,7 +196,7 @@ function CreateSnsAccountForm() {
           <Select value={platform} onChange={(e) => setPlatform(e.target.value as SnsPlatform)}>
             {PLATFORMS.map((p) => (
               <option key={p} value={p}>
-                {SOURCE_TYPE_LABEL[p] ?? p}
+                {PLATFORM_LABEL[p] ?? p}
               </option>
             ))}
           </Select>
@@ -391,7 +399,7 @@ export default function AdminSnsAccountsPage() {
                     <div className="min-w-0">
                       <p className="truncate font-medium text-gray-900">{account.display_name}</p>
                       <p className="text-xs text-gray-500">
-                        {SOURCE_TYPE_LABEL[account.platform] ?? account.platform}
+                        {PLATFORM_LABEL[account.platform] ?? account.platform}
                       </p>
                     </div>
                     <Badge tone={account.status === "active" ? "success" : "warning"}>
@@ -469,7 +477,7 @@ export default function AdminSnsAccountsPage() {
                 {accounts.map((account) => (
                   <Fragment key={account.id}>
                     <Tr className="hover:bg-gray-50">
-                      <Td>{SOURCE_TYPE_LABEL[account.platform] ?? account.platform}</Td>
+                      <Td>{PLATFORM_LABEL[account.platform] ?? account.platform}</Td>
                       <Td>{account.display_name}</Td>
                       {isAdmin && (
                         <Td>
