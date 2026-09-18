@@ -54,7 +54,9 @@ export const MOCK_SOURCES: Source[] = [
     id: 2,
     name: "댕러버 카페",
     type: "naver_cafe",
-    config: { cafe_id: "dogloveu" },
+    // 설정은 검색어 하나뿐이다 — 검색 API 가 카페를 지정할 수 없어 `cafe_id` 라는 키는 없고,
+    // 보내면 서버가 422 로 거른다(백엔드 PR #120 / 이슈 #121).
+    config: { query: "강아지 간식" },
     poll_interval_sec: 600,
     enabled: true,
     last_success_at: "2026-07-19T08:30:00Z",
@@ -126,8 +128,9 @@ export const MOCK_SOURCES: Source[] = [
  * 같으므로, 두 번째 검색에서 dedup 때문에 검토 큐가 늘지 않는 동작이 mock QA 에서 그대로
  * 재현된다(그럼에도 `stored` 는 같은 수가 온다 — 백엔드가 "키워드 일치 수"를 세기 때문).
  *
- * `naver_cafe` 키가 없는 건 의도적이다 — 어댑터 미구현이라 실서버는 502
- * (`검색 실패 — 지원되지 않는 소스 타입: naver_cafe`)를 낸다. mock 도 같은 502 를 낸다.
+ * `naver_cafe` 항목의 글은 **게시 시각이 null, `author` 자리에 카페 이름**이다 — 검색 API 가
+ * 글쓴이와 작성 시각을 주지 않아 실서버가 그렇게 돌려준다(백엔드 PR #120 / 이슈 #121).
+ * 사람 이름처럼 넣어두면 mock QA 에서 `{{author}}` 렌더 에러와 빈 날짜 칸을 못 만난다.
  */
 export const MOCK_POLLED_POSTS: Partial<Record<SourceType, PolledPost[]>> = {
   threads: [
@@ -152,6 +155,32 @@ export const MOCK_POLLED_POSTS: Partial<Record<SourceType, PolledPost[]>> = {
       url: "https://www.threads.com/@cafe_hopper/post/2003",
       content: "오늘 날씨 좋아서 한강 다녀왔어요 ☀️",
       published_at: "2026-09-01T09:15:00Z",
+    },
+  ],
+  naver_cafe: [
+    {
+      external_post_id: "nc_2101",
+      // 글쓴이가 아니라 **카페 이름**이다 — 검색 API 가 글쓴이를 주지 않는다.
+      author: "댕댕이 사랑방",
+      url: "https://cafe.naver.com/example/2101",
+      content: "강아지 간식 어디서 사시나요? 카페 공구 진행하는 곳 있으면 알려주세요",
+      // 게시 시각은 항상 null — 목록의 날짜 칸이 빈 채로 정상이어야 한다.
+      published_at: null,
+    },
+    {
+      external_post_id: "nc_2102",
+      author: "애견창업 정보공유",
+      url: "https://cafe.naver.com/example/2102",
+      content: "소형견 강아지 간식 급여량 정리해봤습니다",
+      published_at: null,
+    },
+    {
+      // 키워드에 걸리지 않는 글 — 반환은 됐지만 큐에는 안 들어가는 케이스.
+      external_post_id: "nc_2103",
+      author: "점포창업 카페",
+      url: "https://cafe.naver.com/example/2103",
+      content: "상가 임대료 요즘 어떤가요",
+      published_at: null,
     },
   ],
   community: [
@@ -256,11 +285,12 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     id: 3,
     source_id: 2,
     external_post_id: "nc_2001",
-    author: "cafe_user_1",
+    // 네이버 카페는 글쓴이 대신 카페 이름이 오고 게시 시각은 항상 null 이다(PR #120).
+    author: "댕댕이 사랑방",
     url: "https://cafe.naver.com/example/2001",
     content: "반려견 수제간식 추천 부탁드려요 초보라 칼로리 계산이 어렵네요",
     matched_keyword_id: 3,
-    published_at: "2026-07-18T09:00:00Z",
+    published_at: null,
     matched_at: "2026-07-18T09:10:00Z",
     status: "replied",
     // 수동 복사(전송 불가) 소스도 approve 가 CAS 클레임을 거친다(backend/app/api/matches.py) — 값이 남는다.
@@ -270,11 +300,11 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     id: 4,
     source_id: 2,
     external_post_id: "nc_2002",
-    author: "cafe_user_2",
+    author: "애견창업 정보공유",
     url: "https://cafe.naver.com/example/2002",
     content: "강아지 간식 너무 많이 줘서 살쪘나봐요 체중관리 후기 공유합니다",
     matched_keyword_id: 1,
-    published_at: "2026-07-17T14:00:00Z",
+    published_at: null,
     matched_at: "2026-07-17T14:03:00Z",
     status: "ignored",
     sending_claimed_at: null,
@@ -326,13 +356,15 @@ export const MOCK_MATCHED_POSTS: MatchedPost[] = [
     id: 8,
     source_id: 2,
     external_post_id: "nc_2003",
-    author: "cafe_user_3",
+    // 사람 이름이 아니라 카페 이름이다(PR #120) — 실서버는 이 소스에서 글쓴이를 못 받는다.
+    author: "댕댕이 사랑방",
     url: "https://cafe.naver.com/example/2003",
     // 네이버 카페(can_write=false) + status=new 재현용 — 승인→클립보드 복사 플로우
     // (MatchDetailPage handleCopy)를 mock 환경에서 확인할 유일한 naver_cafe 케이스.
     content: "강아지 간식 급여량 계산기 써보신 분 계신가요, 초보라 감이 안 잡히네요",
     matched_keyword_id: 1,
-    published_at: "2026-07-21T10:00:00Z",
+    // 네이버 카페는 게시 시각도 주지 않는다 — 상세 화면의 "게시일시" 가 `-` 로 뜨는 게 정상.
+    published_at: null,
     matched_at: "2026-07-21T10:05:00Z",
     status: "new",
     sending_claimed_at: null,

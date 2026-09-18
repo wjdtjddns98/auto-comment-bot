@@ -18,6 +18,7 @@ import { Card } from "../components/ui/Card";
 import { Field, Select, Textarea } from "../components/ui/Input";
 import { Toast, type ToastTone } from "../components/ui/Toast";
 import {
+  authorFieldLabel,
   formatDateTime,
   getSourceDisplayName,
   isWritableSourceType,
@@ -202,7 +203,10 @@ export default function MatchDetailPage() {
             {/* 목록(#73)과 동일하게 비활성 소스는 배지로 표시 — 화면 간 상태 표시 일관성. */}
             {source && !source.enabled && <Badge tone="neutral">비활성</Badge>}
           </span>
-          <span>작성자: {match.author ?? "-"}</span>
+          {/* 네이버 카페는 글쓴이를 못 받아 이 자리에 카페 이름이 온다(PR #120) — 제목을 바꿔 준다. */}
+          <span>
+            {authorFieldLabel(source?.type)}: {match.author ?? "-"}
+          </span>
           <span>게시일시: {formatDateTime(match.published_at)}</span>
           <span>매칭일시: {formatDateTime(match.matched_at)}</span>
         </div>

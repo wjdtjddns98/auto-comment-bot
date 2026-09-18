@@ -10,6 +10,7 @@ import { Card } from "../components/ui/Card";
 import { Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 import {
+  describeAuthor,
   formatDateTime,
   getSourceDisplayName,
   HEALTH_TONE,
@@ -290,7 +291,9 @@ export default function DashboardPage() {
                     <Td className="max-w-sm truncate" title={content}>
                       {content}
                     </Td>
-                    <Td>{m.author ?? "-"}</Td>
+                    {/* 소스마다 이 칸의 의미가 다르다 — 네이버 카페는 글쓴이 대신 카페 이름이
+                        오므로(PR #120) 열 제목은 그대로 두고 값에 "카페" 를 붙여 구분한다. */}
+                    <Td>{describeAuthor(source?.type, m.author, "-")}</Td>
                     <Td className="whitespace-nowrap">{formatDateTime(m.matched_at)}</Td>
                     <Td>
                       {m.url && (

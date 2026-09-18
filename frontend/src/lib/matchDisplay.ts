@@ -30,19 +30,32 @@ export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
   community: "커뮤니티",
 };
 
-// 어댑터 구현 여부 — community(RSS)·threads(키워드 검색) 등록 가능, naver_cafe 는 여전히 미구현(등록 422).
+// 어댑터 구현 여부 — 세 타입 모두 등록 가능하다(naver_cafe 어댑터는 백엔드 PR #120 에서 붙어
+// 등록이 422 → 201, 수동 검색이 502 → 정상으로 바뀌었다. 이슈 #121 공유).
 export const SOURCE_TYPE_IMPLEMENTED: Record<SourceType, boolean> = {
   threads: true,
-  naver_cafe: false,
+  naver_cafe: true,
   community: true,
 };
+
+/**
+ * 검색어(`config.query`)로 수집하는 소스인가 — 설정 폼이 갈리는 기준.
+ *
+ * threads 는 검색어 + 수집 계정, naver_cafe 는 **검색어 하나가 설정 전부**다(검색 API 가 카페를
+ * 지정할 수 없어 `cafe_id` 같은 키는 존재하지 않고, 서버 스키마가 `extra=forbid` 라 얹으면 422).
+ * community 만 RSS URL 을 받는다.
+ */
+export function isSearchQuerySource(type: SourceType): boolean {
+  return type === "threads" || type === "naver_cafe";
+}
 
 export function getRssUrl(config: Record<string, unknown>): string {
   const value = config.rss_url;
   return typeof value === "string" ? value : "";
 }
 
-export function getThreadsQuery(config: Record<string, unknown>): string {
+// 검색어 기반 소스(threads·naver_cafe) 공용 — 두 타입 모두 설정 키가 `query` 다.
+export function getSearchQuery(config: Record<string, unknown>): string {
   const value = config.query;
   return typeof value === "string" ? value : "";
 }
@@ -55,9 +68,34 @@ export function getThreadsAccountId(config: Record<string, unknown>): number | "
 // 이슈 #35 — 소스 표시용 이름. 미설정 시 타입별 config 값(URL/검색어)으로 폴백.
 export function getSourceDisplayName(source: Source): string {
   if (source.name) return source.name;
-  if (source.type === "threads") return getThreadsQuery(source.config) || `#${source.id}`;
+  if (isSearchQuerySource(source.type)) return getSearchQuery(source.config) || `#${source.id}`;
   if (source.type === "community") return getRssUrl(source.config) || `#${source.id}`;
   return `#${source.id}`;
+}
+
+/**
+ * 라벨이 붙는 칸("작성자: …")의 제목.
+ *
+ * 네이버 카페 검색 API 는 글쓴이를 주지 않아 `author` 자리에 **카페 이름**이 온다(PR #120).
+ * 그걸 "작성자"로 적으면 화면이 없는 사실을 말하게 되므로 소스 종류로 갈라 준다.
+ */
+export function authorFieldLabel(type: SourceType | undefined): string {
+  return type === "naver_cafe" ? "출처 카페" : "작성자";
+}
+
+/**
+ * 라벨 없이 값만 놓는 칸(표 셀·목록 머리)의 글쓴이 문구.
+ *
+ * 네이버 카페는 카페 이름이므로 사람 이름으로 읽히지 않게 접두어를 붙인다. `fallback` 은 값이
+ * 없을 때 표시할 문구 — 표에서는 `-`, 검색 결과 목록에서는 "작성자 미상" 처럼 자리마다 다르다.
+ */
+export function describeAuthor(
+  type: SourceType | undefined,
+  author: string | null,
+  fallback: string
+): string {
+  if (!author) return fallback;
+  return type === "naver_cafe" ? `카페 ${author}` : author;
 }
 
 /**
@@ -68,8 +106,8 @@ export function getSourceDisplayName(source: Source): string {
  * 화면과 결과 목록으로 흩어지지 않게 한다(이슈 #118).
  */
 export function describeSourceTarget(source: Source): string {
-  if (source.type === "threads") {
-    const query = getThreadsQuery(source.config);
+  if (isSearchQuerySource(source.type)) {
+    const query = getSearchQuery(source.config);
     return query ? `검색어 "${query}"` : "검색어 미설정";
   }
   if (source.type === "community") {
