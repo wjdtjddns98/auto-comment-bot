@@ -21,6 +21,7 @@ import {
   formatDateTime,
   getSourceDisplayName,
   isWritableSourceType,
+  platformForSourceType,
   RECONCILED_UNPUBLISHED_ERROR,
   REPLY_ACTION_LABEL,
   STATUS_LABEL,
@@ -255,7 +256,7 @@ export default function MatchDetailPage() {
               >
                 <option value="">계정 선택</option>
                 {(snsAccounts ?? [])
-                  .filter((a) => a.platform === source?.type)
+                  .filter((a) => source && a.platform === platformForSourceType(source.type))
                   .map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.display_name}

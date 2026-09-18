@@ -118,7 +118,14 @@ export interface PatchTemplateRequest {
   enabled?: boolean;
 }
 
-export type SnsPlatform = "threads" | "naver_cafe" | "community";
+/**
+ * SNS 계정의 플랫폼 — 소스 종류(`SourceType`)와 **값이 다르다**.
+ *
+ * 네이버는 계정 플랫폼에서 `naver`, 소스 종류에서 `naver_cafe` 다. 표기가 갈린 건 실수가 아니라
+ * 백엔드가 둘을 별개 enum 으로 두고 대응 표로 잇기 때문이다(`backend/app/api/matches.py`
+ * `_PLATFORM_FOR_SOURCE`). 여기에 `naver_cafe` 를 쓰면 계정 등록이 항상 422 로 떨어진다.
+ */
+export type SnsPlatform = "threads" | "naver" | "community";
 
 export interface SnsAccount {
   id: number;

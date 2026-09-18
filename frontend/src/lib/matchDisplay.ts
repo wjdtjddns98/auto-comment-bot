@@ -1,5 +1,11 @@
 import type { BadgeTone } from "../components/ui/Badge";
-import type { MatchedPostStatus, ReplyActionType, Source, SourceType } from "../types/api";
+import type {
+  MatchedPostStatus,
+  ReplyActionType,
+  SnsPlatform,
+  Source,
+  SourceType,
+} from "../types/api";
 
 export const STATUS_LABEL: Record<MatchedPostStatus, string> = {
   new: "신규",
@@ -116,6 +122,23 @@ const WRITABLE_SOURCE_TYPES: SourceType[] = ["threads"];
 
 export function isWritableSourceType(type: SourceType): boolean {
   return WRITABLE_SOURCE_TYPES.includes(type);
+}
+
+/**
+ * 소스 종류에 대응하는 계정 플랫폼 — 백엔드 `_PLATFORM_FOR_SOURCE`(app/api/matches.py)의 거울.
+ *
+ * 두 값은 같지 않다(네이버는 소스 `naver_cafe` ↔ 계정 `naver`). 승인 시 서버가 이 대응으로
+ * 계정을 검증하므로(어긋나면 422), 계정 목록을 걸러낼 때 소스 종류와 플랫폼을 직접 비교하면
+ * 안 된다 — threads 만 우연히 값이 같아 동작하는 것처럼 보인다.
+ */
+const PLATFORM_FOR_SOURCE_TYPE: Record<SourceType, SnsPlatform> = {
+  threads: "threads",
+  naver_cafe: "naver",
+  community: "community",
+};
+
+export function platformForSourceType(type: SourceType): SnsPlatform {
+  return PLATFORM_FOR_SOURCE_TYPE[type];
 }
 
 export const REPLY_ACTION_LABEL: Record<ReplyActionType, string> = {

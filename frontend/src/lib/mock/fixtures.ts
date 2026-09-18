@@ -216,7 +216,8 @@ export const MOCK_SNS_ACCOUNTS: SnsAccount[] = [
   {
     id: 2,
     user_id: 1,
-    platform: "naver_cafe",
+    // 계정 플랫폼은 `naver` 다 — 소스 종류(`naver_cafe`)와 값이 다르다(types/api.ts SnsPlatform).
+    platform: "naver",
     display_name: "누띠_어드민",
     status: "active",
     token_expires_at: "2026-08-15T00:00:00Z",
