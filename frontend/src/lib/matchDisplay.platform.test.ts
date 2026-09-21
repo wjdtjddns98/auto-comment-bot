@@ -16,4 +16,10 @@ describe("platformForSourceType", () => {
     expect(platformForSourceType("threads")).toBe("threads");
     expect(platformForSourceType("community")).toBe("community");
   });
+
+  it("dcinside 는 대응하는 계정 플랫폼이 없다 — 계정을 붙이면 승인이 422 다", () => {
+    // 백엔드 Platform enum 에 dcinside 값이 없고 `_PLATFORM_FOR_SOURCE` 에도 항목이 없다
+    // (PR #124). "빠진 것 같으니 채우자" 는 수정이 들어오면 승인 경로가 조용히 깨진다.
+    expect(platformForSourceType("dcinside")).toBeNull();
+  });
 });

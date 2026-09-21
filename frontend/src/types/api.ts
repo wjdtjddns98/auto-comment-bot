@@ -21,7 +21,7 @@ export interface Health {
   };
 }
 
-export type SourceType = "threads" | "naver_cafe" | "community";
+export type SourceType = "threads" | "naver_cafe" | "community" | "dcinside";
 
 export interface Source {
   id: number;

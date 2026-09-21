@@ -37,20 +37,22 @@ function makeSource(overrides: Partial<Source>): Source {
 }
 
 describe("naver_cafe 소스 등록 가능 여부", () => {
-  it("세 타입 모두 어댑터가 있다 — 화면이 등록을 막지 않아야 한다", () => {
+  it("네 타입 모두 어댑터가 있다 — 화면이 등록을 막지 않아야 한다", () => {
     expect(SOURCE_TYPE_IMPLEMENTED).toEqual({
       threads: true,
       naver_cafe: true,
       community: true,
+      dcinside: true,
     });
   });
 });
 
 describe("isSearchQuerySource", () => {
-  it("threads·naver_cafe 는 검색어로 수집하고 community 만 RSS URL 을 받는다", () => {
+  it("threads·naver_cafe 만 검색어로 수집한다 — community·dcinside 는 다른 설정 키를 받는다", () => {
     expect(isSearchQuerySource("threads")).toBe(true);
     expect(isSearchQuerySource("naver_cafe")).toBe(true);
     expect(isSearchQuerySource("community")).toBe(false);
+    expect(isSearchQuerySource("dcinside")).toBe(false);
   });
 });
 

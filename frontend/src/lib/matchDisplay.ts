@@ -34,25 +34,44 @@ export const SOURCE_TYPE_LABEL: Record<SourceType, string> = {
   threads: "Threads",
   naver_cafe: "네이버 카페",
   community: "커뮤니티",
+  dcinside: "디시인사이드",
 };
 
-// 어댑터 구현 여부 — 세 타입 모두 등록 가능하다(naver_cafe 어댑터는 백엔드 PR #120 에서 붙어
-// 등록이 422 → 201, 수동 검색이 502 → 정상으로 바뀌었다. 이슈 #121 공유).
+// 어댑터 구현 여부 — 네 타입 모두 등록 가능하다(naver_cafe 는 백엔드 PR #120, dcinside 는 PR #124
+// 에서 붙어 등록이 422 → 201, 수동 검색이 502 → 정상으로 바뀌었다. 이슈 #121·#125 공유).
 export const SOURCE_TYPE_IMPLEMENTED: Record<SourceType, boolean> = {
   threads: true,
   naver_cafe: true,
   community: true,
+  dcinside: true,
 };
 
 /**
- * 검색어(`config.query`)로 수집하는 소스인가 — 설정 폼이 갈리는 기준.
+ * 소스가 받는 설정 키의 종류 — 등록/편집 폼이 어떤 입력칸을 보여줄지 가르는 기준.
  *
- * threads 는 검색어 + 수집 계정, naver_cafe 는 **검색어 하나가 설정 전부**다(검색 API 가 카페를
- * 지정할 수 없어 `cafe_id` 같은 키는 존재하지 않고, 서버 스키마가 `extra=forbid` 라 얹으면 422).
- * community 만 RSS URL 을 받는다.
+ * 서버 스키마가 전부 `extra=forbid` 라 **종류가 다른 키를 얹으면 그 자리에서 422** 다. 그래서
+ * "검색어냐 아니냐" 의 2분기로는 부족하다 — dcinside 는 검색어도 RSS 도 아닌 `gallery_id` 를
+ * 받는다. 소스 종류가 늘 때 이 표 한 곳만 채우면 폼·표시 문구가 함께 따라온다.
  */
+export type SourceConfigKind = "query" | "rss" | "gallery";
+
+const SOURCE_CONFIG_KIND: Record<SourceType, SourceConfigKind> = {
+  // threads 는 검색어 + 수집 계정, naver_cafe 는 검색어 하나가 설정 전부다(검색 API 가 카페를
+  // 지정할 수 없어 `cafe_id` 같은 키는 존재하지 않는다).
+  threads: "query",
+  naver_cafe: "query",
+  community: "rss",
+  // dcinside 는 갤러리 공개 목록 페이지를 읽는다 — 설정은 `gallery_id` 하나뿐이다(PR #124).
+  dcinside: "gallery",
+};
+
+export function sourceConfigKind(type: SourceType): SourceConfigKind {
+  return SOURCE_CONFIG_KIND[type];
+}
+
+/** 검색어(`config.query`)로 수집하는 소스인가 — threads·naver_cafe. */
 export function isSearchQuerySource(type: SourceType): boolean {
-  return type === "threads" || type === "naver_cafe";
+  return sourceConfigKind(type) === "query";
 }
 
 export function getRssUrl(config: Record<string, unknown>): string {
@@ -66,6 +85,17 @@ export function getSearchQuery(config: Record<string, unknown>): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * 디시인사이드 갤러리 id(`config.gallery_id`).
+ *
+ * 서버가 영숫자·`_` 1~40자로 제한한다 — URL 쿼리 주입 차단 목적이라 화면이 임의 문자열을
+ * 보내면 422 다(backend/app/sources/dcinside.py).
+ */
+export function getGalleryId(config: Record<string, unknown>): string {
+  const value = config.gallery_id;
+  return typeof value === "string" ? value : "";
+}
+
 export function getThreadsAccountId(config: Record<string, unknown>): number | "" {
   const value = config.sns_account_id;
   return typeof value === "number" ? value : "";
@@ -74,9 +104,18 @@ export function getThreadsAccountId(config: Record<string, unknown>): number | "
 // 이슈 #35 — 소스 표시용 이름. 미설정 시 타입별 config 값(URL/검색어)으로 폴백.
 export function getSourceDisplayName(source: Source): string {
   if (source.name) return source.name;
-  if (isSearchQuerySource(source.type)) return getSearchQuery(source.config) || `#${source.id}`;
-  if (source.type === "community") return getRssUrl(source.config) || `#${source.id}`;
-  return `#${source.id}`;
+  switch (sourceConfigKind(source.type)) {
+    case "query":
+      return getSearchQuery(source.config) || `#${source.id}`;
+    case "rss":
+      return getRssUrl(source.config) || `#${source.id}`;
+    case "gallery": {
+      // 갤러리 id 만 놓으면("dog") 사람이 지은 이름처럼 읽힌다 — 검색어·URL 과 달리 값 자체가
+      // 무슨 소스인지 말해주지 않아서, 여기서만 한 단어를 붙여 준다.
+      const gallery = getGalleryId(source.config);
+      return gallery ? `${gallery} 갤러리` : `#${source.id}`;
+    }
+  }
 }
 
 /**
@@ -112,15 +151,20 @@ export function describeAuthor(
  * 화면과 결과 목록으로 흩어지지 않게 한다(이슈 #118).
  */
 export function describeSourceTarget(source: Source): string {
-  if (isSearchQuerySource(source.type)) {
-    const query = getSearchQuery(source.config);
-    return query ? `검색어 "${query}"` : "검색어 미설정";
+  switch (sourceConfigKind(source.type)) {
+    case "query": {
+      const query = getSearchQuery(source.config);
+      return query ? `검색어 "${query}"` : "검색어 미설정";
+    }
+    case "rss": {
+      const url = getRssUrl(source.config);
+      return url ? `피드 ${url}` : "피드 URL 미설정";
+    }
+    case "gallery": {
+      const gallery = getGalleryId(source.config);
+      return gallery ? `갤러리 "${gallery}"` : "갤러리 ID 미설정";
+    }
   }
-  if (source.type === "community") {
-    const url = getRssUrl(source.config);
-    return url ? `피드 ${url}` : "피드 URL 미설정";
-  }
-  return `소스 #${source.id}`;
 }
 
 /**
@@ -169,13 +213,17 @@ export function isWritableSourceType(type: SourceType): boolean {
  * 계정을 검증하므로(어긋나면 422), 계정 목록을 걸러낼 때 소스 종류와 플랫폼을 직접 비교하면
  * 안 된다 — threads 만 우연히 값이 같아 동작하는 것처럼 보인다.
  */
-const PLATFORM_FOR_SOURCE_TYPE: Record<SourceType, SnsPlatform> = {
+const PLATFORM_FOR_SOURCE_TYPE: Record<SourceType, SnsPlatform | null> = {
   threads: "threads",
   naver_cafe: "naver",
   community: "community",
+  // dcinside 에 대응하는 계정 플랫폼은 **없다** — 백엔드 Platform enum 에 값이 없고
+  // `_PLATFORM_FOR_SOURCE` 에도 항목이 없어서, 어떤 계정을 붙여 승인해도 422 가 된다.
+  // 읽기 전용 소스(`can_write=false`)라 승인은 클립보드 복사 경로로만 간다(PR #124).
+  dcinside: null,
 };
 
-export function platformForSourceType(type: SourceType): SnsPlatform {
+export function platformForSourceType(type: SourceType): SnsPlatform | null {
   return PLATFORM_FOR_SOURCE_TYPE[type];
 }
 

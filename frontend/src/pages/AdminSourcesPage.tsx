@@ -19,12 +19,13 @@ import {
   describeAuthor,
   describeSourceTarget,
   formatDateTime,
+  getGalleryId,
   getRssUrl,
   getSearchQuery,
   getSourceDisplayName,
   getThreadsAccountId,
   HEALTH_TONE,
-  isSearchQuerySource,
+  sourceConfigKind,
   sourceErrorTitle,
   toPlainText,
 } from "../lib/matchDisplay";
@@ -36,7 +37,11 @@ import { Field, Input, Select } from "../components/ui/Input";
 import { Table, Tbody, Td, Th, Thead, Tr } from "../components/ui/Table";
 import { Toast } from "../components/ui/Toast";
 
-const SOURCE_TYPES: SourceType[] = ["threads", "naver_cafe", "community"];
+const SOURCE_TYPES: SourceType[] = ["threads", "naver_cafe", "community", "dcinside"];
+
+// 서버가 `gallery_id` 에 거는 제한(영숫자·`_`, 1~40자) — URL 쿼리 주입 차단 목적이라 넘기면
+// 422 다. 같은 규칙을 화면에서 먼저 걸러 "추가를 눌렀는데 에러" 대신 입력 중에 알려준다.
+const GALLERY_ID_PATTERN = /^[A-Za-z0-9_]{1,40}$/;
 
 function CreateSourceForm() {
   const queryClient = useQueryClient();
@@ -45,11 +50,12 @@ function CreateSourceForm() {
   const [name, setName] = useState("");
   const [rssUrl, setRssUrl] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [galleryId, setGalleryId] = useState("");
   const [threadsAccountId, setThreadsAccountId] = useState<number | "">("");
   const [pollIntervalSec, setPollIntervalSec] = useState(300);
   const [error, setError] = useState<string | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[type];
-  const isQuerySource = isSearchQuerySource(type);
+  const configKind = sourceConfigKind(type);
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
 
   const mutation = useMutation({
@@ -58,6 +64,7 @@ function CreateSourceForm() {
       setName("");
       setRssUrl("");
       setSearchQuery("");
+      setGalleryId("");
       setThreadsAccountId("");
       setError(null);
       queryClient.invalidateQueries({ queryKey: ["sources"] });
@@ -68,7 +75,7 @@ function CreateSourceForm() {
   function handleSubmit() {
     if (!implemented) return;
     const trimmedName = name.trim();
-    if (isQuerySource) {
+    if (configKind === "query") {
       if (!searchQuery.trim()) {
         setError("검색어를 입력하세요.");
         return;
@@ -85,6 +92,21 @@ function CreateSourceForm() {
           type === "threads"
             ? { query: searchQuery.trim(), sns_account_id: threadsAccountId }
             : { query: searchQuery.trim() },
+        poll_interval_sec: pollIntervalSec,
+      });
+      return;
+    }
+    if (configKind === "gallery") {
+      const gallery = galleryId.trim();
+      if (!GALLERY_ID_PATTERN.test(gallery)) {
+        setError("갤러리 ID는 영문·숫자·밑줄(_)만 쓸 수 있고 1~40자여야 합니다.");
+        return;
+      }
+      // 디시인사이드는 갤러리 id 가 설정의 전부다 — 다른 키를 얹으면 422 다(extra=forbid).
+      mutation.mutate({
+        name: trimmedName || undefined,
+        type,
+        config: { gallery_id: gallery },
         poll_interval_sec: pollIntervalSec,
       });
       return;
@@ -133,7 +155,7 @@ function CreateSourceForm() {
           />
         </Field>
       </div>
-      {isQuerySource ? (
+      {configKind === "query" ? (
         <div className="flex flex-col gap-1">
           <div className="flex flex-wrap gap-4">
             <Field label="검색어(1~100자)">
@@ -168,6 +190,23 @@ function CreateSourceForm() {
               쓰므로 여기서 계정을 고르지 않습니다 — 답변은 전송 대신 클립보드 복사로 처리됩니다.
             </p>
           )}
+        </div>
+      ) : configKind === "gallery" ? (
+        <div className="flex flex-col gap-1">
+          <Field label="갤러리 ID(영문·숫자·밑줄, 1~40자)">
+            <Input
+              type="text"
+              maxLength={40}
+              placeholder="예: dog"
+              value={galleryId}
+              onChange={(e) => setGalleryId(e.target.value)}
+            />
+          </Field>
+          <p className="text-xs text-gray-500">
+            갤러리 주소의 <code>id=</code> 값입니다(<code>…/board/lists/?id=dog</code> → <code>dog</code>).
+            목록 페이지만 읽어 <strong>제목만</strong> 수집하므로 키워드도 제목에서만 걸리고, 게시
+            시각은 당일 글에만 붙습니다 — 답변은 전송 대신 클립보드 복사로 처리됩니다.
+          </p>
         </div>
       ) : implemented ? (
         <Field label="RSS URL">
@@ -293,6 +332,7 @@ function SourceRow({ source }: { source: Source }) {
   const [pollIntervalSec, setPollIntervalSec] = useState(source.poll_interval_sec);
   const [rssUrl, setRssUrl] = useState(() => getRssUrl(source.config));
   const [searchQuery, setSearchQuery] = useState(() => getSearchQuery(source.config));
+  const [galleryId, setGalleryId] = useState(() => getGalleryId(source.config));
   const [threadsAccountId, setThreadsAccountId] = useState<number | "">(() =>
     getThreadsAccountId(source.config)
   );
@@ -305,7 +345,7 @@ function SourceRow({ source }: { source: Source }) {
   const pollErrorTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const implemented = SOURCE_TYPE_IMPLEMENTED[source.type];
   const isThreads = source.type === "threads";
-  const isQuerySource = isSearchQuerySource(source.type);
+  const configKind = sourceConfigKind(source.type);
   const threadsAccounts = (snsAccounts ?? []).filter((a) => a.platform === "threads");
 
   function invalidate() {
@@ -383,7 +423,7 @@ function SourceRow({ source }: { source: Source }) {
       name: name.trim() || null,
     };
     if (implemented) {
-      if (isQuerySource) {
+      if (configKind === "query") {
         if (!searchQuery.trim()) {
           setError("검색어를 입력하세요.");
           return;
@@ -396,6 +436,13 @@ function SourceRow({ source }: { source: Source }) {
         body.config = isThreads
           ? { query: searchQuery.trim(), sns_account_id: threadsAccountId }
           : { query: searchQuery.trim() };
+      } else if (configKind === "gallery") {
+        const gallery = galleryId.trim();
+        if (!GALLERY_ID_PATTERN.test(gallery)) {
+          setError("갤러리 ID는 영문·숫자·밑줄(_)만 쓸 수 있고 1~40자여야 합니다.");
+          return;
+        }
+        body.config = { gallery_id: gallery };
       } else {
         if (!rssUrl.trim()) {
           setError("RSS URL을 입력하세요.");
@@ -430,7 +477,7 @@ function SourceRow({ source }: { source: Source }) {
           )}
         </Td>
         <Td className="max-w-xs">
-          {editing && implemented && isQuerySource ? (
+          {editing && implemented && configKind === "query" ? (
             <div className="flex flex-col gap-1">
               <Input
                 type="text"
@@ -454,6 +501,15 @@ function SourceRow({ source }: { source: Source }) {
                 </Select>
               )}
             </div>
+          ) : editing && implemented && configKind === "gallery" ? (
+            <Input
+              type="text"
+              maxLength={40}
+              placeholder="갤러리 ID(예: dog)"
+              value={galleryId}
+              onChange={(e) => setGalleryId(e.target.value)}
+              className="w-full"
+            />
           ) : editing && implemented ? (
             <Input
               type="url"
@@ -465,8 +521,12 @@ function SourceRow({ source }: { source: Source }) {
             <span className="break-all text-xs text-gray-500">
               "{getSearchQuery(source.config)}" · 계정 #{getThreadsAccountId(source.config) || "-"}
             </span>
-          ) : isQuerySource ? (
+          ) : configKind === "query" ? (
             <span className="break-all text-xs text-gray-500">"{getSearchQuery(source.config)}"</span>
+          ) : configKind === "gallery" ? (
+            <span className="break-all text-xs text-gray-500">
+              갤러리 {getGalleryId(source.config) || "미설정"}
+            </span>
           ) : implemented ? (
             <span className="break-all text-xs text-gray-500">{getRssUrl(source.config)}</span>
           ) : (
@@ -599,7 +659,9 @@ export default function AdminSourcesPage() {
     <section className="flex flex-col gap-6">
       <div>
         <h1 className="text-xl font-semibold text-gray-900">소스 관리</h1>
-        <p className="text-sm text-gray-500">Threads/네이버 카페/커뮤니티 소스를 등록하고 관리합니다.</p>
+        <p className="text-sm text-gray-500">
+          Threads/네이버 카페/커뮤니티/디시인사이드 소스를 등록하고 관리합니다.
+        </p>
       </div>
 
       <CreateSourceForm />
