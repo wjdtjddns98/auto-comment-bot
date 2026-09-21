@@ -22,7 +22,7 @@ import {
   SOURCE_TYPE_LABEL,
   sourceConfigKind,
 } from "./matchDisplay";
-import type { Source } from "../types/api";
+import type { Source, SourceType } from "../types/api";
 
 function makeSource(overrides: Partial<Source>): Source {
   return {
@@ -90,6 +90,24 @@ describe("글쓴이 자리의 의미", () => {
 
   it("유동닉도 값 그대로 둔다 — 여러 글에 같은 'ㅇㅇ' 가 반복되는 것이 정상이다", () => {
     expect(describeAuthor("dcinside", "ㅇㅇ", "-")).toBe("ㅇㅇ");
+  });
+});
+
+describe("모르는 소스 종류가 먼저 도착했을 때", () => {
+  // 이 PR 이 대응한 상황이 바로 그것이다 — 백엔드가 새 소스 종류를 먼저 내보내고 FE 가 며칠
+  // 뒤따라간다. 그 사이 `SOURCE_CONFIG_KIND` 조회는 undefined 라 switch 가 어느 case 에도
+  // 안 걸리고, 폴백이 없으면 함수가 undefined 를 돌려줘 이름 칸이 **빈칸**이 된다.
+  // 타입은 이 상황을 표현할 수 없어(유니온이 소진됐다고 본다) 캐스팅으로 재현한다.
+  const unknownType = "mastodon" as SourceType;
+
+  it("이름 칸이 비지 않고 소스 번호로 떨어진다", () => {
+    expect(getSourceDisplayName(makeSource({ id: 77, type: unknownType, config: {} }))).toBe("#77");
+  });
+
+  it("수동 검색 머리말도 비지 않는다", () => {
+    expect(describeSourceTarget(makeSource({ id: 77, type: unknownType, config: {} }))).toBe(
+      "소스 #77"
+    );
   });
 });
 

@@ -116,6 +116,10 @@ export function getSourceDisplayName(source: Source): string {
       return gallery ? `${gallery} 갤러리` : `#${source.id}`;
     }
   }
+  // 타입에는 닿지 않는 줄이지만 실행에는 닿는다 — 백엔드가 FE 보다 먼저 새 소스 종류를
+  // 내보내면(이 PR 이 대응하는 바로 그 상황) `SOURCE_CONFIG_KIND` 조회가 undefined 라 switch 가
+  // 어느 case 에도 안 걸린다. 이 줄이 없으면 이름 칸이 `#6` 대신 **빈칸**으로 뜬다.
+  return `#${source.id}`;
 }
 
 /**
@@ -165,6 +169,8 @@ export function describeSourceTarget(source: Source): string {
       return gallery ? `갤러리 "${gallery}"` : "갤러리 ID 미설정";
     }
   }
+  // 위 `getSourceDisplayName` 과 같은 이유의 안전망 — 모르는 소스 종류라도 머리말이 비지 않게.
+  return `소스 #${source.id}`;
 }
 
 /**

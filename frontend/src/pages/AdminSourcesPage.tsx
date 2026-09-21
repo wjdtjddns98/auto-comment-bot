@@ -204,8 +204,10 @@ function CreateSourceForm() {
           </Field>
           <p className="text-xs text-gray-500">
             갤러리 주소의 <code>id=</code> 값입니다(<code>…/board/lists/?id=dog</code> → <code>dog</code>).
-            목록 페이지만 읽어 <strong>제목만</strong> 수집하므로 키워드도 제목에서만 걸리고, 게시
-            시각은 당일 글에만 붙습니다 — 답변은 전송 대신 클립보드 복사로 처리됩니다.
+            <strong>정식(메인) 갤러리만 지원합니다</strong> — 마이너 갤러리(<code>/mgallery/</code>)는
+            id 생김새가 같아 등록은 되지만 수집 시점에 실패합니다. 목록 페이지만 읽어{" "}
+            <strong>제목만</strong> 수집하므로 키워드도 제목에서만 걸리고, 게시 시각은 당일 글에만
+            붙습니다 — 답변은 전송 대신 클립보드 복사로 처리됩니다.
           </p>
         </div>
       ) : implemented ? (
