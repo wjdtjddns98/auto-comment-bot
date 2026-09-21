@@ -26,6 +26,7 @@ import {
   getThreadsAccountId,
   HEALTH_TONE,
   sourceConfigKind,
+  sourceEditFields,
   sourceErrorTitle,
   toPlainText,
 } from "../lib/matchDisplay";
@@ -330,14 +331,13 @@ function SourceRow({ source }: { source: Source }) {
   const queryClient = useQueryClient();
   const { data: snsAccounts } = useQuery({ queryKey: ["snsAccounts"], queryFn: getSnsAccounts });
   const [editing, setEditing] = useState(false);
-  const [name, setName] = useState(source.name ?? "");
-  const [pollIntervalSec, setPollIntervalSec] = useState(source.poll_interval_sec);
-  const [rssUrl, setRssUrl] = useState(() => getRssUrl(source.config));
-  const [searchQuery, setSearchQuery] = useState(() => getSearchQuery(source.config));
-  const [galleryId, setGalleryId] = useState(() => getGalleryId(source.config));
-  const [threadsAccountId, setThreadsAccountId] = useState<number | "">(() =>
-    getThreadsAccountId(source.config)
-  );
+  const initial = sourceEditFields(source);
+  const [name, setName] = useState(initial.name);
+  const [pollIntervalSec, setPollIntervalSec] = useState(initial.pollIntervalSec);
+  const [rssUrl, setRssUrl] = useState(initial.rssUrl);
+  const [searchQuery, setSearchQuery] = useState(initial.searchQuery);
+  const [galleryId, setGalleryId] = useState(initial.galleryId);
+  const [threadsAccountId, setThreadsAccountId] = useState<number | "">(initial.threadsAccountId);
   const [error, setError] = useState<string | null>(null);
   const [deleteBlocked, setDeleteBlocked] = useState(false);
   const [pollResult, setPollResult] = useState<PollNowResponse | null>(null);
@@ -352,6 +352,25 @@ function SourceRow({ source }: { source: Source }) {
 
   function invalidate() {
     queryClient.invalidateQueries({ queryKey: ["sources"] });
+  }
+
+  /**
+   * 편집을 **열 때** 모든 칸을 지금의 서버 값으로 되돌린다.
+   *
+   * 닫을 때가 아니라 열 때 되돌리는 이유: 편집 중에 목록이 다시 받아와도(React Query 재요청)
+   * 입력 중인 값을 덮어쓰지 않으면서, 다음에 여는 폼은 항상 최신 값에서 시작하기 때문이다.
+   * 취소는 그냥 닫기만 하면 된다 — 버린 값이 남아 있어도 다음에 열 때 여기서 씻긴다.
+   */
+  function startEditing() {
+    const fields = sourceEditFields(source);
+    setName(fields.name);
+    setPollIntervalSec(fields.pollIntervalSec);
+    setRssUrl(fields.rssUrl);
+    setSearchQuery(fields.searchQuery);
+    setGalleryId(fields.galleryId);
+    setThreadsAccountId(fields.threadsAccountId);
+    setError(null);
+    setEditing(true);
   }
 
   const patchMutation = useMutation({
@@ -583,7 +602,14 @@ function SourceRow({ source }: { source: Source }) {
                 <Button size="sm" onClick={handleSave} disabled={patchMutation.isPending}>
                   저장
                 </Button>
-                <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setError(null);
+                    setEditing(false);
+                  }}
+                >
                   취소
                 </Button>
               </>
@@ -603,7 +629,7 @@ function SourceRow({ source }: { source: Source }) {
                       ? `${retryAfterSec}초 후 재시도`
                       : "지금 검색"}
                 </Button>
-                <Button size="sm" variant="secondary" onClick={() => setEditing(true)}>
+                <Button size="sm" variant="secondary" onClick={startEditing}>
                   수정
                 </Button>
                 <Button
