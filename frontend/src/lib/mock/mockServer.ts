@@ -382,7 +382,12 @@ const SOURCE_CONFIG_KEYS: Record<SourceType, { required: string[]; optional: str
   threads: { required: ["query", "sns_account_id"], optional: [] },
   naver_cafe: { required: ["query"], optional: [] },
   community: { required: ["rss_url"], optional: [] },
+  dcinside: { required: ["gallery_id"], optional: [] },
 };
+
+// 서버는 `gallery_id` 에 값 검증까지 건다(영숫자·`_` 1~40자 — URL 쿼리 주입 차단,
+// backend/app/sources/dcinside.py). 키만 맞으면 통과시키면 "목에선 됐는데 실서버는 422" 가 된다.
+const GALLERY_ID_PATTERN = /^[A-Za-z0-9_]{1,40}$/;
 
 function validateSourceConfig(type: SourceType, config: Record<string, unknown>): void {
   const spec = SOURCE_CONFIG_KEYS[type];
@@ -398,6 +403,12 @@ function validateSourceConfig(type: SourceType, config: Record<string, unknown>)
     throw new MockApiError(
       422,
       `소스 설정이 올바르지 않습니다 — config.${extra}: 허용되지 않는 항목입니다`
+    );
+  }
+  if (type === "dcinside" && !GALLERY_ID_PATTERN.test(String(config.gallery_id))) {
+    throw new MockApiError(
+      422,
+      "소스 설정이 올바르지 않습니다 — config.gallery_id: 영문·숫자·밑줄(_) 1~40자여야 합니다"
     );
   }
 }

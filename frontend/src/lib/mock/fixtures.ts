@@ -119,6 +119,22 @@ export const MOCK_SOURCES: Source[] = [
     last_error: null,
     last_error_at: null,
   },
+  {
+    id: 6,
+    // 이름을 일부러 비운다 — 표시 폴백이 갤러리 id 로 떨어지는지(= 소스 번호 `#6` 으로 새지
+    // 않는지) mock 화면에서 바로 보이게 하기 위함이다.
+    name: null,
+    type: "dcinside",
+    // 갤러리 id 하나가 설정의 전부다 — 다른 키를 얹으면 422(서버 스키마 extra=forbid).
+    config: { gallery_id: "dog" },
+    poll_interval_sec: 600,
+    enabled: true,
+    last_success_at: "2026-07-21T08:40:00Z",
+    health_status: "ok",
+    backoff_until: null,
+    last_error: null,
+    last_error_at: null,
+  },
 ];
 
 /**
@@ -197,6 +213,37 @@ export const MOCK_POLLED_POSTS: Partial<Record<SourceType, PolledPost[]>> = {
       author: null,
       url: "https://example-petcommunity.com/board/3002",
       content: "중형견 산책 코스 공유합니다",
+      published_at: null,
+    },
+  ],
+  // 디시인사이드는 목록 페이지만 읽고 본문을 요청하지 않는다(글마다 요청하면 주기당 50배 —
+  // 예의 있는 수집에 어긋난다). 그래서 `content` 는 **제목뿐**이고 매칭도 제목 기준이다.
+  // 게시 시각은 **당일 글에만** 값이 있다 — 목록의 `26/09/17` 축약은 연도·타임존이 모호해
+  // 서버가 버린다. 시각 있는 글과 없는 글이 한 목록에 섞인 화면을 미리 보기 위한 픽스처다
+  // (백엔드 PR #124 / 이슈 #125).
+  dcinside: [
+    {
+      external_post_id: "dcinside|dog|4412201",
+      // 갤 닉네임은 사람 이름이다(`author_is_person=true`) — 카페와 달리 접두어를 붙이지 않는다.
+      author: "댕댕이아빠",
+      url: "https://gall.dcinside.com/board/view/?id=dog&no=4412201",
+      content: "강아지 간식 추천 좀 해주세요 4개월 말티즈임",
+      published_at: "2026-09-01T13:20:00Z",
+    },
+    {
+      external_post_id: "dcinside|dog|4412188",
+      // 유동닉 — 디시에서 흔하고 여러 글에 같은 값이 반복된다.
+      author: "ㅇㅇ",
+      url: "https://gall.dcinside.com/board/view/?id=dog&no=4412188",
+      content: "강아지 간식 하루에 몇 개 줌?",
+      published_at: null,
+    },
+    {
+      // 키워드에 걸리지 않는 글 — 반환은 됐지만 큐에는 안 들어가는 케이스.
+      external_post_id: "dcinside|dog|4412170",
+      author: "ㅇㅇ",
+      url: "https://gall.dcinside.com/board/view/?id=dog&no=4412170",
+      content: "우리 댕댕이 사진 투척",
       published_at: null,
     },
   ],
