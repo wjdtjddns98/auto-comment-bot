@@ -96,6 +96,35 @@ export function getGalleryId(config: Record<string, unknown>): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * 소스 편집 폼이 서버 값으로 시작할 때 채울 값 한 묶음.
+ *
+ * 편집 칸은 `useState(() => getXxx(source.config))` 로 잡는데, 초기화 함수는 **최초 마운트에만**
+ * 평가된다. 그래서 편집을 열 때마다 여기서 다시 읽어 넣지 않으면 두 가지가 샌다 — 고치다 만
+ * 값을 취소하고 다시 열었을 때 그 값이 남아 있고(폴링 주기만 바꾸려다 설정이 조용히 함께
+ * 바뀐다), 다른 탭에서 바뀐 소스를 목록이 다시 받아와도 폼은 낡은 값을 보여준다.
+ *
+ * 설정 키가 종류마다 다르므로(`sourceConfigKind`) 쓰지 않는 칸은 빈 값으로 온다 — 저장은
+ * 종류에 맞는 키 하나만 보내므로(서버 스키마가 `extra=forbid`) 그대로 두어도 새어 나가지 않는다.
+ */
+export function sourceEditFields(source: Source): {
+  name: string;
+  pollIntervalSec: number;
+  rssUrl: string;
+  searchQuery: string;
+  galleryId: string;
+  threadsAccountId: number | "";
+} {
+  return {
+    name: source.name ?? "",
+    pollIntervalSec: source.poll_interval_sec,
+    rssUrl: getRssUrl(source.config),
+    searchQuery: getSearchQuery(source.config),
+    galleryId: getGalleryId(source.config),
+    threadsAccountId: getThreadsAccountId(source.config),
+  };
+}
+
 export function getThreadsAccountId(config: Record<string, unknown>): number | "" {
   const value = config.sns_account_id;
   return typeof value === "number" ? value : "";
