@@ -4,7 +4,9 @@
 
 ## 🎬 시연 영상
 
-[![sns댓글봇 시연 영상](docs/media/snsbot-demo.jpg)](https://github.com/wjdtjddns98/auto-comment-bot/releases/download/demo-2026-08/snsbot-demo.mp4)
+[![sns댓글봇 시연 영상](docs/media/snsbot-demo.jpg)](
+https://github.com/user-attachments/assets/50954530-5524-4357-b3f7-07c85475a6a8
+)
 
 키워드 감지 → 대시보드 → 사람 승인 → Threads 발송 흐름을 테스트 계정으로 돌린 영상. 720p, 클릭하면 재생·내려받기. (Release `demo-2026-08` 자산)
 
